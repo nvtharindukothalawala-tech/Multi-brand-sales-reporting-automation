@@ -1,0 +1,39 @@
+
+# Python virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Private company datasets and reports
+data/raw/
+data/processed/
+data/templates/
+output/
+
+# Excel and CSV files
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+
+# Sensitive configuration
+.env
+.env.*
+config/reporting_scope_review.csv
+
+# Local settings
+.vscode/
+.idea/
+
+# Temporary files
+*.log
+*.tmp
+~$*
+
+# Operating system
+.DS_Store
+Thumbs.db
