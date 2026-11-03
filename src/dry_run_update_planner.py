@@ -7,7 +7,7 @@ import json
 
 import pandas as pd
 from openpyxl import load_workbook
-
+from src.transaction_matching import compare_transactions
 
 # ==========================================
 # 1. PROJECT CONFIGURATION
@@ -194,37 +194,37 @@ finally:
     workbook.close()
 
 
+
 # ==========================================
 # 7. COMPARE TRANSACTIONS
 # ==========================================
 
-incoming_keys = Counter(
-    make_key(record)
-    for record in incoming.to_dict("records")
+# Convert incoming DataFrame into records
+incoming_records = incoming.to_dict("records")
+
+# Use the reusable, tested matching function
+comparison = compare_transactions(
+    incoming_records,
+    existing_records
 )
 
-existing_keys = Counter(
-    make_key(record)
-    for record in existing_records
-)
+matched_count = comparison["matched"]
+new_count = comparison["new"]
+existing_only_count = comparison["existing_only"]
 
-matching = incoming_keys & existing_keys
-
-incoming_only = incoming_keys - existing_keys
-
-existing_only = existing_keys - incoming_keys
-
-matched_count = sum(matching.values())
-new_count = sum(incoming_only.values())
-existing_only_count = sum(existing_only.values())
-
-# Account for every transaction occurrence
-assert matched_count + new_count == len(incoming)
+# Validate transaction counts
+assert (
+    matched_count + new_count
+    == len(incoming_records)
+), "Incoming transaction count mismatch"
 
 assert (
     matched_count + existing_only_count
     == len(existing_records)
-)
+), "Existing workbook count mismatch"
+
+print("\nTransaction comparison validated.")
+
 
 
 # ==========================================
