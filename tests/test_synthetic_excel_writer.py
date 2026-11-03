@@ -135,3 +135,120 @@ def test_writer_rejects_overwrite(tmp_path):
         )
 
     assert sha256(output) == before
+
+
+# ==========================================
+# TEST 4: REPEATED EXECUTION
+# ==========================================
+
+def test_writer_is_idempotent(tmp_path):
+
+    original = tmp_path / "original.xlsx"
+    first_output = tmp_path / "first_output.xlsx"
+    second_output = tmp_path / "second_output.xlsx"
+
+    make_workbook(original)
+
+    incoming = [
+        fake_sale("TEST001"),
+        fake_sale("TEST002"),
+    ]
+
+    # First execution
+    first_result = write_synthetic_copy(
+        original,
+        first_output,
+        incoming,
+    )
+
+    assert first_result["matched"] == 1
+    assert first_result["inserted"] == 1
+
+    # Second execution using the first output
+    second_result = write_synthetic_copy(
+        first_output,
+        second_output,
+        incoming,
+    )
+
+    assert second_result["matched"] == 2
+    assert second_result["inserted"] == 0
+    assert second_result["existing_after"] == 2
+
+    # Check transaction cells in second output
+    wb = load_workbook(second_output)
+
+    try:
+        ws = wb["SalesRepItem"]
+
+        assert ws["Z5"].value == "TEST001"
+        assert ws["Z6"].value == "TEST002"
+        assert ws["Z7"].value is None
+
+    finally:
+        wb.close()
+
+
+# ==========================================
+# TEST 5: REPEATED IDENTICAL TRANSACTIONS
+# ==========================================
+
+def test_writer_preserves_duplicate_occurrences(tmp_path):
+
+    original = tmp_path / "original.xlsx"
+    output = tmp_path / "updated.xlsx"
+
+    make_workbook(original)
+
+    # Original workbook contains one TEST001.
+    # Incoming data contains three TEST001 lines.
+    incoming = [
+        fake_sale("TEST001"),
+        fake_sale("TEST001"),
+        fake_sale("TEST001"),
+    ]
+
+    result = write_synthetic_copy(
+        original,
+        output,
+        incoming,
+    )
+
+    assert result["matched"] == 1
+    assert result["inserted"] == 2
+    assert result["existing_after"] == 3
+
+    wb = load_workbook(output)
+
+    try:
+        ws = wb["SalesRepItem"]
+
+        assert ws["Z5"].value == "TEST001"
+        assert ws["Z6"].value == "TEST001"
+        assert ws["Z7"].value == "TEST001"
+
+    finally:
+        wb.close()
+
+
+# ==========================================
+# TEST 6: SOURCE AND OUTPUT MUST DIFFER
+# ==========================================
+
+def test_writer_rejects_same_input_output(tmp_path):
+
+    original = tmp_path / "original.xlsx"
+
+    make_workbook(original)
+
+    original_hash = sha256(original)
+
+    with pytest.raises(ValueError):
+        write_synthetic_copy(
+            original,
+            original,
+            [fake_sale("TEST002")],
+        )
+
+    # Original workbook must remain unchanged
+    assert sha256(original) == original_hash
