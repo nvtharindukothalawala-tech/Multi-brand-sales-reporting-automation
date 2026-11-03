@@ -65,6 +65,97 @@ def read_existing_records(ws):
 
 
 # ==========================================
+# WORKBOOK STRUCTURE VALIDATION
+# ==========================================
+
+def validate_workbook_structure(ws):
+    """
+    Validate the controlled synthetic layout.
+
+    Reject:
+    1. Structured Excel tables
+    2. Merged cells in the transaction area
+    3. Footer, total, or unsupported non-data rows
+
+    This function does not modify the worksheet.
+    """
+
+    # --------------------------------------
+    # CHECK 1: STRUCTURED EXCEL TABLES
+    # --------------------------------------
+
+    if len(ws.tables) > 0:
+        raise ValueError(
+            "Structured Excel tables are not "
+            "supported by this writer."
+        )
+
+    # --------------------------------------
+    # CHECK 2: MERGED TRANSACTION CELLS
+    # --------------------------------------
+
+    for merged_range in ws.merged_cells.ranges:
+
+        intersects_transaction_area = (
+            merged_range.max_row >= 5
+            and merged_range.min_col <= 52
+        )
+
+        if intersects_transaction_area:
+            raise ValueError(
+                "Merged cells detected in "
+                "the transaction area: "
+                f"{merged_range}"
+            )
+
+    # --------------------------------------
+    # CHECK 3: FOOTERS AND UNSUPPORTED ROWS
+    # --------------------------------------
+
+    footer_labels = {
+        "TOTAL",
+        "GRAND TOTAL",
+        "SUBTOTAL",
+        "SUMMARY",
+    }
+
+    for row_number in range(5, ws.max_row + 1):
+
+        bill_no = ws[f"Z{row_number}"].value
+
+        # Check for known footer labels.
+        if isinstance(bill_no, str):
+
+            if bill_no.strip().upper() in footer_labels:
+                raise ValueError(
+                    "Footer or total row detected "
+                    f"at row {row_number}."
+                )
+
+        # An entirely empty row is acceptable.
+        has_content = any(
+            ws.cell(
+                row=row_number,
+                column=column,
+            ).value is not None
+            for column in range(1, 53)
+        )
+
+        if not has_content:
+            continue
+
+        # In our synthetic layout, every populated
+        # transaction-area row must have a bill number.
+        if bill_no is None or str(bill_no).strip() == "":
+            raise ValueError(
+                "Unsupported non-transaction row "
+                f"detected at row {row_number}."
+            )
+
+    return True
+
+
+# ==========================================
 # 3. COPY FORMULAS AND FORMATTING
 # ==========================================
 
@@ -205,15 +296,22 @@ def write_synthetic_copy(
                 "SalesRepItem sheet is missing."
             )
 
+        
         ws = wb["SalesRepItem"]
 
+        # Check synthetic workbook marker first.
         if ws["A1"].value != TEST_MARKER:
             raise ValueError(
                 "Not a synthetic test workbook. "
                 "Writing is blocked."
             )
 
+        # Validate workbook structure before
+        # comparing or inserting transactions.
+        validate_workbook_structure(ws)
+
         existing_records = read_existing_records(ws)
+
 
         # ----------------------------------
         # CHECK FOR EXISTING TRANSACTIONS
