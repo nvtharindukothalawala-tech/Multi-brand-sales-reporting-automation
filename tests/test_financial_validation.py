@@ -64,3 +64,106 @@ def test_reconciliation_detects_wrong_amount():
             inserted,
             output,
         )
+
+# ==========================================
+# LESSON 36 - TRANSACTION ACCURACY TESTS
+# ==========================================
+
+from decimal import Decimal
+
+
+def detailed_sale(bill_no, amount, date_value="2026-10-10"):
+    return {
+        "bill_no": bill_no,
+        "product": "TEST_SHIRT",
+        "cost_price": 1000,
+        "sales_price": amount,
+        "sold_qty": 1,
+        "cost_amount": 1000,
+        "sales_amount": amount,
+        "date": date_value,
+    }
+
+
+# ==========================================
+# TEST 4: DETECT COMPENSATING AMOUNT ERRORS
+# ==========================================
+
+def test_reconciliation_detects_offsetting_errors():
+
+    existing = [
+        detailed_sale("TEST001", 1500),
+        detailed_sale("TEST002", 2500),
+    ]
+
+    # Total is still 4000, but amounts are wrong.
+    output = [
+        detailed_sale("TEST001", 1400),
+        detailed_sale("TEST002", 2600),
+    ]
+
+    with pytest.raises(ValueError):
+        reconcile_totals(
+            existing,
+            [],
+            output,
+        )
+
+
+# ==========================================
+# TEST 5: DETECT CHANGED TRANSACTION DATE
+# ==========================================
+
+def test_reconciliation_detects_changed_date():
+
+    existing = [
+        detailed_sale(
+            "TEST001",
+            1500,
+            "2026-10-10",
+        ),
+    ]
+
+    # Same financial amounts, different date.
+    output = [
+        detailed_sale(
+            "TEST001",
+            1500,
+            "2026-10-11",
+        ),
+    ]
+
+    with pytest.raises(ValueError):
+        reconcile_totals(
+            existing,
+            [],
+            output,
+        )
+
+
+# ==========================================
+# TEST 6: EXACT DECIMAL PRECISION
+# ==========================================
+
+def test_financial_decimal_precision():
+
+    records = [
+        {
+            "sold_qty": 1,
+            "cost_amount": Decimal("0.05"),
+            "sales_amount": Decimal("0.10"),
+        },
+        {
+            "sold_qty": 1,
+            "cost_amount": Decimal("0.15"),
+            "sales_amount": Decimal("0.20"),
+        },
+    ]
+
+    totals = calculate_totals(records)
+
+    assert totals["sold_qty"] == Decimal("2")
+
+    assert totals["cost_amount"] == Decimal("0.20")
+
+    assert totals["sales_amount"] == Decimal("0.30")
