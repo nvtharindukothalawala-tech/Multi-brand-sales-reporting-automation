@@ -169,3 +169,140 @@ def test_new_row_formatting_is_copied(tmp_path):
 
     finally:
         wb.close()
+
+
+# ==========================================
+# TEST 4: ABSOLUTE AND MIXED REFERENCES
+# ==========================================
+
+def test_absolute_and_mixed_references(tmp_path):
+
+    original = tmp_path / "original.xlsx"
+    output = tmp_path / "updated.xlsx"
+
+    create_formatted_workbook(original)
+
+    # Add a more complicated formula.
+    wb = load_workbook(original)
+
+    try:
+        ws = wb["SalesRepItem"]
+
+        ws["B5"] = "=AT5*$AQ$2+AQ$1+$AT5"
+
+        wb.save(original)
+    finally:
+        wb.close()
+
+    write_synthetic_copy(
+        original,
+        output,
+        [
+            fake_sale("TEST001"),
+            fake_sale("TEST002"),
+        ],
+    )
+
+    wb = load_workbook(output)
+
+    try:
+        ws = wb["SalesRepItem"]
+
+        assert ws["B6"].value == (
+            "=AT6*$AQ$2+AQ$1+$AT6"
+        )
+
+    finally:
+        wb.close()
+
+
+# ==========================================
+# TEST 5: MULTIPLE NEW ROWS
+# ==========================================
+
+def test_formulas_translate_across_rows(tmp_path):
+
+    original = tmp_path / "original.xlsx"
+    output = tmp_path / "updated.xlsx"
+
+    create_formatted_workbook(original)
+
+    write_synthetic_copy(
+        original,
+        output,
+        [
+            fake_sale("TEST001"),
+            fake_sale("TEST002"),
+            fake_sale("TEST003"),
+            fake_sale("TEST004"),
+        ],
+    )
+
+    wb = load_workbook(output)
+
+    try:
+        ws = wb["SalesRepItem"]
+
+        assert ws["B5"].value == "=AT5*AQ5"
+        assert ws["B6"].value == "=AT6*AQ6"
+        assert ws["B7"].value == "=AT7*AQ7"
+        assert ws["B8"].value == "=AT8*AQ8"
+
+        assert ws["Z8"].value == "TEST004"
+
+    finally:
+        wb.close()
+
+
+# ==========================================
+# TEST 6: PRESERVE OTHER WORKSHEETS
+# ==========================================
+
+def test_other_worksheets_are_preserved(tmp_path):
+
+    original = tmp_path / "original.xlsx"
+    output = tmp_path / "updated.xlsx"
+
+    create_formatted_workbook(original)
+
+    wb = load_workbook(original)
+
+    try:
+        summary = wb.create_sheet("Monthly Total")
+
+        summary["A1"] = "SYNTHETIC SUMMARY"
+        summary["B2"] = "=SUM(1,2,3)"
+
+        wb.save(original)
+    finally:
+        wb.close()
+
+    write_synthetic_copy(
+        original,
+        output,
+        [
+            fake_sale("TEST001"),
+            fake_sale("TEST002"),
+        ],
+    )
+
+    wb = load_workbook(output)
+
+    try:
+        assert wb.sheetnames == [
+            "SalesRepItem",
+            "Monthly Total",
+        ]
+
+        summary = wb["Monthly Total"]
+
+        assert summary["A1"].value == (
+            "SYNTHETIC SUMMARY"
+        )
+
+        assert summary["B2"].value == (
+            "=SUM(1,2,3)"
+        )
+
+    finally:
+        wb.close()
