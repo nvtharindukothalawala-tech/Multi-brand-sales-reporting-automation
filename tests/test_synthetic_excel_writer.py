@@ -252,3 +252,53 @@ def test_writer_rejects_same_input_output(tmp_path):
 
     # Original workbook must remain unchanged
     assert sha256(original) == original_hash
+
+
+# ==========================================
+# LESSON 32: TRANSACTION VALIDATION TESTS
+# ==========================================
+
+@pytest.mark.parametrize(
+    "field,invalid_value",
+    [
+        ("bill_no", "   "),
+        ("product", ""),
+        ("sold_qty", 0),
+        ("sales_amount", "not-a-number"),
+        ("date", "not-a-date"),
+    ],
+)
+def test_writer_rejects_invalid_transactions(
+    tmp_path,
+    field,
+    invalid_value,
+):
+    original = tmp_path / "original.xlsx"
+    output = tmp_path / "updated.xlsx"
+
+    make_workbook(original)
+
+    original_hash = sha256(original)
+
+    invalid_sale = fake_sale("TEST002")
+
+    # Change one field to an invalid value.
+    invalid_sale[field] = invalid_value
+
+    incoming = [
+        fake_sale("TEST001"),
+        invalid_sale,
+    ]
+
+    with pytest.raises(ValueError):
+        write_synthetic_copy(
+            original,
+            output,
+            incoming,
+        )
+
+    # Invalid data must not create an output.
+    assert not output.exists()
+
+    # Original workbook must remain unchanged.
+    assert sha256(original) == original_hash

@@ -8,6 +8,10 @@ from openpyxl.formula.translate import Translator
 
 from src.transaction_matching import make_transaction_key
 
+from decimal import Decimal, InvalidOperation
+from datetime import date, datetime
+
+import pandas as pd
 
 # ==========================================
 # 1. SYNTHETIC WORKBOOK CONFIGURATION
@@ -296,7 +300,6 @@ def write_synthetic_copy(
                 "SalesRepItem sheet is missing."
             )
 
-        
         ws = wb["SalesRepItem"]
 
         # Check synthetic workbook marker first.
@@ -306,11 +309,17 @@ def write_synthetic_copy(
                 "Writing is blocked."
             )
 
-        # Validate workbook structure before
-        # comparing or inserting transactions.
+        
+        # Validate the synthetic workbook structure.
         validate_workbook_structure(ws)
 
+        # Validate all incoming transactions
+        # before preparing any Excel changes.
+        validate_incoming_transactions(incoming_records)
+
+        # Read existing workbook transactions.
         existing_records = read_existing_records(ws)
+
 
 
         # ----------------------------------
@@ -399,3 +408,153 @@ def write_synthetic_copy(
             len(existing_records) + len(new_records)
         ),
     }
+
+
+# ==========================================
+# VALIDATE INCOMING TRANSACTIONS
+# ==========================================
+
+def validate_incoming_transactions(records):
+    """
+    Validate all incoming synthetic transactions.
+
+    Reject invalid data before Excel writing.
+    """
+
+    required_fields = {
+        "bill_no",
+        "product",
+        "sold_qty",
+        "cost_price",
+        "sales_price",
+        "cost_amount",
+        "sales_amount",
+        "date",
+    }
+
+    if not records:
+        raise ValueError(
+            "No incoming transactions provided."
+        )
+
+    numeric_fields = {
+        "sold_qty",
+        "cost_price",
+        "sales_price",
+        "cost_amount",
+        "sales_amount",
+    }
+
+    for row_number, record in enumerate(
+        records, start=1
+    ):
+
+        if not isinstance(record, dict):
+            raise ValueError(
+                f"Transaction {row_number}: "
+                "Record must be a dictionary."
+            )
+
+        # ----------------------------------
+        # CHECK 1: REQUIRED FIELDS
+        # ----------------------------------
+
+        missing_fields = (
+            required_fields - set(record.keys())
+        )
+
+        if missing_fields:
+            raise ValueError(
+                f"Transaction {row_number}: "
+                f"Missing fields: {sorted(missing_fields)}"
+            )
+
+        # ----------------------------------
+        # CHECK 2: BILL NUMBER AND PRODUCT
+        # ----------------------------------
+
+        for field in ["bill_no", "product"]:
+
+            value = record[field]
+
+            if (
+                value is None
+                or not str(value).strip()
+                or pd.isna(value)
+            ):
+                raise ValueError(
+                    f"Transaction {row_number}: "
+                    f"Invalid {field}."
+                )
+
+        # ----------------------------------
+        # CHECK 3: NUMERIC VALUES
+        # ----------------------------------
+
+        for field in numeric_fields:
+
+            value = record[field]
+
+            if (
+                value is None
+                or isinstance(value, bool)
+                or pd.isna(value)
+            ):
+                raise ValueError(
+                    f"Transaction {row_number}: "
+                    f"Invalid {field}."
+                )
+
+            try:
+                number = Decimal(str(value).strip())
+
+            except (InvalidOperation, ValueError):
+                raise ValueError(
+                    f"Transaction {row_number}: "
+                    f"Invalid {field}."
+                ) from None
+
+            if not number.is_finite():
+                raise ValueError(
+                    f"Transaction {row_number}: "
+                    f"Non-finite {field}."
+                )
+
+            # Sales quantity must be positive.
+            if field == "sold_qty" and number <= 0:
+                raise ValueError(
+                    f"Transaction {row_number}: "
+                    "Sold quantity must be positive."
+                )
+
+        # ----------------------------------
+        # CHECK 4: TRANSACTION DATE
+        # ----------------------------------
+
+        transaction_date = record["date"]
+
+        if (
+            transaction_date is None
+            or pd.isna(transaction_date)
+        ):
+            raise ValueError(
+                f"Transaction {row_number}: "
+                "Missing transaction date."
+            )
+
+        try:
+            parsed_date = pd.to_datetime(
+                transaction_date,
+                errors="raise",
+            )
+
+            if pd.isna(parsed_date):
+                raise ValueError("Invalid date")
+
+        except (ValueError, TypeError, OverflowError):
+            raise ValueError(
+                f"Transaction {row_number}: "
+                "Invalid transaction date."
+            ) from None
+
+    return True
