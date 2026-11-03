@@ -1,17 +1,26 @@
 
+# ==========================================
+# SYNTHETIC EXCEL WRITING ENGINE
+# LESSON 35 - COMPLETE VERSION
+# ==========================================
+
+import os
+import tempfile
+
 from collections import Counter
 from copy import copy
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
+
+import pandas as pd
 
 from openpyxl import load_workbook
 from openpyxl.formula.translate import Translator
 
 from src.transaction_matching import make_transaction_key
+from src.financial_validation import reconcile_totals
 
-from decimal import Decimal, InvalidOperation
-from datetime import date, datetime
-
-import pandas as pd
 
 # ==========================================
 # 1. SYNTHETIC WORKBOOK CONFIGURATION
@@ -47,7 +56,10 @@ COLUMN_INDEXES = {
 # ==========================================
 
 def read_existing_records(ws):
-    """Read transaction records from a test sheet."""
+    """
+    Read transaction records from the
+    synthetic Excel worksheet.
+    """
 
     records = []
 
@@ -55,6 +67,7 @@ def read_existing_records(ws):
         min_row=5,
         values_only=True,
     ):
+
         if len(row) < 52 or row[25] is None:
             continue
 
@@ -69,23 +82,19 @@ def read_existing_records(ws):
 
 
 # ==========================================
-# WORKBOOK STRUCTURE VALIDATION
+# 3. VALIDATE WORKBOOK STRUCTURE
 # ==========================================
 
 def validate_workbook_structure(ws):
     """
-    Validate the controlled synthetic layout.
+    Reject unsupported Excel structures.
 
-    Reject:
-    1. Structured Excel tables
-    2. Merged cells in the transaction area
-    3. Footer, total, or unsupported non-data rows
-
-    This function does not modify the worksheet.
+    This validation does not change
+    the original worksheet.
     """
 
     # --------------------------------------
-    # CHECK 1: STRUCTURED EXCEL TABLES
+    # CHECK 1: EXCEL TABLES
     # --------------------------------------
 
     if len(ws.tables) > 0:
@@ -95,7 +104,7 @@ def validate_workbook_structure(ws):
         )
 
     # --------------------------------------
-    # CHECK 2: MERGED TRANSACTION CELLS
+    # CHECK 2: MERGED CELLS
     # --------------------------------------
 
     for merged_range in ws.merged_cells.ranges:
@@ -113,7 +122,7 @@ def validate_workbook_structure(ws):
             )
 
     # --------------------------------------
-    # CHECK 3: FOOTERS AND UNSUPPORTED ROWS
+    # CHECK 3: FOOTER AND TOTAL ROWS
     # --------------------------------------
 
     footer_labels = {
@@ -127,7 +136,6 @@ def validate_workbook_structure(ws):
 
         bill_no = ws[f"Z{row_number}"].value
 
-        # Check for known footer labels.
         if isinstance(bill_no, str):
 
             if bill_no.strip().upper() in footer_labels:
@@ -136,7 +144,6 @@ def validate_workbook_structure(ws):
                     f"at row {row_number}."
                 )
 
-        # An entirely empty row is acceptable.
         has_content = any(
             ws.cell(
                 row=row_number,
@@ -148,8 +155,6 @@ def validate_workbook_structure(ws):
         if not has_content:
             continue
 
-        # In our synthetic layout, every populated
-        # transaction-area row must have a bill number.
         if bill_no is None or str(bill_no).strip() == "":
             raise ValueError(
                 "Unsupported non-transaction row "
@@ -160,7 +165,166 @@ def validate_workbook_structure(ws):
 
 
 # ==========================================
-# 3. COPY FORMULAS AND FORMATTING
+# 4. VALIDATE INCOMING TRANSACTIONS
+# ==========================================
+
+def validate_incoming_transactions(records):
+    """
+    Validate every incoming transaction
+    before preparing any Excel changes.
+    """
+
+    required_fields = {
+        "bill_no",
+        "product",
+        "sold_qty",
+        "cost_price",
+        "sales_price",
+        "cost_amount",
+        "sales_amount",
+        "date",
+    }
+
+    numeric_fields = {
+        "sold_qty",
+        "cost_price",
+        "sales_price",
+        "cost_amount",
+        "sales_amount",
+    }
+
+    if not records:
+        raise ValueError(
+            "No incoming transactions provided."
+        )
+
+    for row_number, record in enumerate(
+        records,
+        start=1,
+    ):
+
+        # ----------------------------------
+        # CHECK 1: RECORD TYPE
+        # ----------------------------------
+
+        if not isinstance(record, dict):
+            raise ValueError(
+                f"Transaction {row_number}: "
+                "Record must be a dictionary."
+            )
+
+        # ----------------------------------
+        # CHECK 2: REQUIRED FIELDS
+        # ----------------------------------
+
+        missing_fields = (
+            required_fields - set(record.keys())
+        )
+
+        if missing_fields:
+            raise ValueError(
+                f"Transaction {row_number}: "
+                f"Missing fields: {sorted(missing_fields)}"
+            )
+
+        # ----------------------------------
+        # CHECK 3: TEXT VALUES
+        # ----------------------------------
+
+        for field in ["bill_no", "product"]:
+
+            value = record[field]
+
+            if (
+                value is None
+                or not str(value).strip()
+                or pd.isna(value)
+            ):
+                raise ValueError(
+                    f"Transaction {row_number}: "
+                    f"Invalid {field}."
+                )
+
+        # ----------------------------------
+        # CHECK 4: NUMERIC VALUES
+        # ----------------------------------
+
+        for field in numeric_fields:
+
+            value = record[field]
+
+            if (
+                value is None
+                or isinstance(value, bool)
+                or pd.isna(value)
+            ):
+                raise ValueError(
+                    f"Transaction {row_number}: "
+                    f"Invalid {field}."
+                )
+
+            try:
+                number = Decimal(
+                    str(value).strip()
+                )
+
+            except (InvalidOperation, ValueError):
+                raise ValueError(
+                    f"Transaction {row_number}: "
+                    f"Invalid {field}."
+                ) from None
+
+            if not number.is_finite():
+                raise ValueError(
+                    f"Transaction {row_number}: "
+                    f"Non-finite {field}."
+                )
+
+            if field == "sold_qty" and number <= 0:
+                raise ValueError(
+                    f"Transaction {row_number}: "
+                    "Sold quantity must be positive."
+                )
+
+        # ----------------------------------
+        # CHECK 5: TRANSACTION DATE
+        # ----------------------------------
+
+        transaction_date = record["date"]
+
+        if (
+            transaction_date is None
+            or pd.isna(transaction_date)
+        ):
+            raise ValueError(
+                f"Transaction {row_number}: "
+                "Missing transaction date."
+            )
+
+        try:
+            parsed_date = pd.to_datetime(
+                transaction_date,
+                errors="raise",
+            )
+
+            if pd.isna(parsed_date):
+                raise ValueError("Invalid date")
+
+        except (
+            ValueError,
+            TypeError,
+            OverflowError,
+        ):
+            raise ValueError(
+                f"Transaction {row_number}: "
+                "Invalid transaction date."
+            ) from None
+
+    return True
+
+
+# ==========================================
+# 5. COPY FORMULAS AND FORMATTING
 # ==========================================
 
 def copy_row_formatting_and_formulas(
@@ -169,11 +333,10 @@ def copy_row_formatting_and_formulas(
     target_row,
 ):
     """
-    Copy styles from an existing synthetic row
-    into a new row.
+    Copy styles into a new synthetic row.
 
-    Translate formulas in calculated columns A:Y.
-    Do not copy other cell values.
+    Translate formulas in columns A:Y.
+    Do not copy fixed transaction values.
     """
 
     for column in range(1, 53):
@@ -188,7 +351,10 @@ def copy_row_formatting_and_formulas(
             column=column,
         )
 
-        # Copy cell formatting.
+        # ----------------------------------
+        # COPY CELL FORMATTING
+        # ----------------------------------
+
         if source_cell.has_style:
 
             target_cell.font = copy(
@@ -215,10 +381,10 @@ def copy_row_formatting_and_formulas(
                 source_cell.number_format
             )
 
-        # A:Y are the calculated columns
-        # in this controlled synthetic layout.
-        #
-        # Copy formulas only, not fixed values.
+        # ----------------------------------
+        # TRANSLATE CALCULATED FORMULAS
+        # ----------------------------------
+
         if column <= 25:
 
             formula = source_cell.value
@@ -235,13 +401,11 @@ def copy_row_formatting_and_formulas(
                     target_cell.coordinate
                 )
 
-                target_cell.value = (
-                    translated_formula
-                )
+                target_cell.value = translated_formula
 
 
 # ==========================================
-# 4. WRITE A NEW SYNTHETIC WORKBOOK COPY
+# 6. WRITE SYNTHETIC WORKBOOK COPY
 # ==========================================
 
 def write_synthetic_copy(
@@ -250,18 +414,24 @@ def write_synthetic_copy(
     incoming_records,
 ):
     """
-    Create a separate synthetic Excel workbook.
+    Create a verified synthetic Excel copy.
 
-    Preserve the source workbook.
-    Prevent duplicate transaction occurrences.
-    Copy formatting and supported formulas.
+    Features:
+    - Protect original workbook
+    - Block unsupported structures
+    - Validate incoming transactions
+    - Prevent repeated transaction insertion
+    - Copy supported formulas and formatting
+    - Reconcile financial totals
+    - Save and verify temporary output
+    - Refuse overwriting an existing output
     """
 
     source_path = Path(source_path).resolve()
     output_path = Path(output_path).resolve()
 
     # --------------------------------------
-    # SAFETY CHECKS
+    # STEP 1: FILE SAFETY CHECKS
     # --------------------------------------
 
     if source_path == output_path:
@@ -288,7 +458,7 @@ def write_synthetic_copy(
         )
 
     # --------------------------------------
-    # LOAD THE SYNTHETIC WORKBOOK
+    # STEP 2: LOAD WORKBOOK
     # --------------------------------------
 
     wb = load_workbook(source_path)
@@ -302,27 +472,31 @@ def write_synthetic_copy(
 
         ws = wb["SalesRepItem"]
 
-        # Check synthetic workbook marker first.
+        # Verify this is a synthetic workbook.
         if ws["A1"].value != TEST_MARKER:
             raise ValueError(
                 "Not a synthetic test workbook. "
                 "Writing is blocked."
             )
 
-        # Validate the synthetic workbook structure.
+        # ----------------------------------
+        # STEP 3: VALIDATE INPUTS
+        # ----------------------------------
+
         validate_workbook_structure(ws)
 
-        # Validate all incoming transactions
-        # before preparing any Excel changes.
-        validate_incoming_transactions(incoming_records)
-
-        # Read existing workbook transactions.
-        existing_records = read_existing_records(ws)
-
-
+        validate_incoming_transactions(
+            incoming_records
+        )
 
         # ----------------------------------
-        # CHECK FOR EXISTING TRANSACTIONS
+        # STEP 4: READ EXISTING RECORDS
+        # ----------------------------------
+
+        existing_records = read_existing_records(ws)
+
+        # ----------------------------------
+        # STEP 5: DETECT DUPLICATES
         # ----------------------------------
 
         remaining_existing = Counter(
@@ -346,7 +520,7 @@ def write_synthetic_copy(
                 new_records.append(record)
 
         # ----------------------------------
-        # ADD ONLY NEW TRANSACTION ROWS
+        # STEP 6: PREPARE NEW ROWS
         # ----------------------------------
 
         next_row = max(
@@ -354,8 +528,6 @@ def write_synthetic_copy(
             ws.max_row + 1,
         )
 
-        # Existing synthetic layout must have
-        # a transaction row to use as a template.
         if new_records and not existing_records:
             raise ValueError(
                 "No existing transaction template row."
@@ -365,14 +537,12 @@ def write_synthetic_copy(
 
             previous_row = next_row - 1
 
-            # Copy formatting and translate formulas.
             copy_row_formatting_and_formulas(
                 ws=ws,
                 source_row=previous_row,
                 target_row=next_row,
             )
 
-            # Write the new transaction values.
             for field, column in COLUMN_MAP.items():
 
                 ws[f"{column}{next_row}"] = (
@@ -382,7 +552,24 @@ def write_synthetic_copy(
             next_row += 1
 
         # ----------------------------------
-        # SAVE TO A DIFFERENT FILE
+        # STEP 7: RECONCILE IN MEMORY
+        # ----------------------------------
+
+        output_records = read_existing_records(ws)
+
+        reconciliation = reconcile_totals(
+            existing_records,
+            new_records,
+            output_records,
+        )
+
+        if not reconciliation["reconciled"]:
+            raise ValueError(
+                "Financial reconciliation failed."
+            )
+
+        # ----------------------------------
+        # STEP 8: CREATE TEMPORARY WORKBOOK
         # ----------------------------------
 
         output_path.parent.mkdir(
@@ -390,13 +577,75 @@ def write_synthetic_copy(
             exist_ok=True,
         )
 
-        wb.save(output_path)
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=".synthetic_",
+            suffix=".xlsx",
+            dir=output_path.parent,
+        )
+
+        os.close(fd)
+
+        temporary_path = Path(temporary_name)
+
+        try:
+
+            # Save workbook to temporary file.
+            wb.save(temporary_path)
+
+            # ----------------------------------
+            # STEP 9: READ SAVED WORKBOOK AGAIN
+            # ----------------------------------
+
+            verified_workbook = load_workbook(
+                temporary_path,
+                read_only=True,
+                data_only=False,
+            )
+
+            try:
+
+                verified_records = read_existing_records(
+                    verified_workbook["SalesRepItem"]
+                )
+
+            finally:
+                verified_workbook.close()
+
+            # ----------------------------------
+            # STEP 10: RECONCILE SAVED OUTPUT
+            # ----------------------------------
+
+            reconcile_totals(
+                existing_records,
+                new_records,
+                verified_records,
+            )
+
+            # ----------------------------------
+            # STEP 11: PUBLISH VERIFIED OUTPUT
+            # ----------------------------------
+
+            # Does not overwrite an existing file.
+            # Requires filesystem hard-link support.
+            os.link(
+                temporary_path,
+                output_path,
+            )
+
+        finally:
+
+            # Clean up temporary Excel file.
+            temporary_path.unlink(
+                missing_ok=True
+            )
 
     finally:
+
+        # Always close the original workbook.
         wb.close()
 
     # --------------------------------------
-    # RETURN THE EXECUTION SUMMARY
+    # STEP 12: RETURN SUMMARY
     # --------------------------------------
 
     return {
@@ -406,154 +655,5 @@ def write_synthetic_copy(
         "existing_after": (
             len(existing_records) + len(new_records)
         ),
+        "reconciled": True,
     }
-
-
-# ==========================================
-# VALIDATE INCOMING TRANSACTIONS
-# ==========================================
-
-def validate_incoming_transactions(records):
-    """
-    Validate all incoming synthetic transactions.
-
-    Reject invalid data before Excel writing.
-    """
-
-    required_fields = {
-        "bill_no",
-        "product",
-        "sold_qty",
-        "cost_price",
-        "sales_price",
-        "cost_amount",
-        "sales_amount",
-        "date",
-    }
-
-    if not records:
-        raise ValueError(
-            "No incoming transactions provided."
-        )
-
-    numeric_fields = {
-        "sold_qty",
-        "cost_price",
-        "sales_price",
-        "cost_amount",
-        "sales_amount",
-    }
-
-    for row_number, record in enumerate(
-        records, start=1
-    ):
-
-        if not isinstance(record, dict):
-            raise ValueError(
-                f"Transaction {row_number}: "
-                "Record must be a dictionary."
-            )
-
-        # ----------------------------------
-        # CHECK 1: REQUIRED FIELDS
-        # ----------------------------------
-
-        missing_fields = (
-            required_fields - set(record.keys())
-        )
-
-        if missing_fields:
-            raise ValueError(
-                f"Transaction {row_number}: "
-                f"Missing fields: {sorted(missing_fields)}"
-            )
-
-        # ----------------------------------
-        # CHECK 2: BILL NUMBER AND PRODUCT
-        # ----------------------------------
-
-        for field in ["bill_no", "product"]:
-
-            value = record[field]
-
-            if (
-                value is None
-                or not str(value).strip()
-                or pd.isna(value)
-            ):
-                raise ValueError(
-                    f"Transaction {row_number}: "
-                    f"Invalid {field}."
-                )
-
-        # ----------------------------------
-        # CHECK 3: NUMERIC VALUES
-        # ----------------------------------
-
-        for field in numeric_fields:
-
-            value = record[field]
-
-            if (
-                value is None
-                or isinstance(value, bool)
-                or pd.isna(value)
-            ):
-                raise ValueError(
-                    f"Transaction {row_number}: "
-                    f"Invalid {field}."
-                )
-
-            try:
-                number = Decimal(str(value).strip())
-
-            except (InvalidOperation, ValueError):
-                raise ValueError(
-                    f"Transaction {row_number}: "
-                    f"Invalid {field}."
-                ) from None
-
-            if not number.is_finite():
-                raise ValueError(
-                    f"Transaction {row_number}: "
-                    f"Non-finite {field}."
-                )
-
-            # Sales quantity must be positive.
-            if field == "sold_qty" and number <= 0:
-                raise ValueError(
-                    f"Transaction {row_number}: "
-                    "Sold quantity must be positive."
-                )
-
-        # ----------------------------------
-        # CHECK 4: TRANSACTION DATE
-        # ----------------------------------
-
-        transaction_date = record["date"]
-
-        if (
-            transaction_date is None
-            or pd.isna(transaction_date)
-        ):
-            raise ValueError(
-                f"Transaction {row_number}: "
-                "Missing transaction date."
-            )
-
-        try:
-            parsed_date = pd.to_datetime(
-                transaction_date,
-                errors="raise",
-            )
-
-            if pd.isna(parsed_date):
-                raise ValueError("Invalid date")
-
-        except (ValueError, TypeError, OverflowError):
-            raise ValueError(
-                f"Transaction {row_number}: "
-                "Invalid transaction date."
-            ) from None
-
-    return True

@@ -302,3 +302,93 @@ def test_writer_rejects_invalid_transactions(
 
     # Original workbook must remain unchanged.
     assert sha256(original) == original_hash
+
+
+# ==========================================
+# LESSON 35: FINANCIAL RECONCILIATION TESTS
+# ==========================================
+
+def test_writer_reconciles_saved_workbook(tmp_path):
+
+    source = tmp_path / "original.xlsx"
+    output = tmp_path / "updated.xlsx"
+
+    make_workbook(source)
+
+    original_hash = sha256(source)
+
+    result = write_synthetic_copy(
+        source,
+        output,
+        [
+            fake_sale("TEST001"),
+            fake_sale("TEST002"),
+        ],
+    )
+
+    assert result["reconciled"] is True
+    assert result["inserted"] == 1
+
+    from src.financial_validation import calculate_totals
+    from src.synthetic_excel_writer import read_existing_records
+
+    wb = load_workbook(
+        output,
+        read_only=True,
+        data_only=False,
+    )
+
+    try:
+        records = read_existing_records(
+            wb["SalesRepItem"]
+        )
+    finally:
+        wb.close()
+
+    totals = calculate_totals(records)
+
+    assert totals["sold_qty"] == 2
+    assert totals["cost_amount"] == 2000
+    assert totals["sales_amount"] == 3000
+
+    # Source Excel file is unchanged.
+    assert sha256(source) == original_hash
+
+
+def test_reconciliation_failure_blocks_output(
+    tmp_path,
+    monkeypatch,
+):
+
+    source = tmp_path / "original.xlsx"
+    output = tmp_path / "updated.xlsx"
+
+    make_workbook(source)
+
+    original_hash = sha256(source)
+
+    def reject_reconciliation(*args, **kwargs):
+        raise ValueError(
+            "Simulated financial mismatch"
+        )
+
+    monkeypatch.setattr(
+        "src.synthetic_excel_writer.reconcile_totals",
+        reject_reconciliation,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Simulated financial mismatch",
+    ):
+        write_synthetic_copy(
+            source,
+            output,
+            [
+                fake_sale("TEST001"),
+                fake_sale("TEST002"),
+            ],
+        )
+
+    assert not output.exists()
+    assert sha256(source) == original_hash
