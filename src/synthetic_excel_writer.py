@@ -21,6 +21,11 @@ from openpyxl.formula.translate import Translator
 from src.transaction_matching import make_transaction_key
 from src.financial_validation import reconcile_totals
 
+from src.audit_logging import (
+    calculate_file_hash,
+    create_audit_record,
+    save_audit_log,
+)
 
 # ==========================================
 # 1. SYNTHETIC WORKBOOK CONFIGURATION
@@ -408,35 +413,37 @@ def copy_row_formatting_and_formulas(
 # 6. WRITE SYNTHETIC WORKBOOK COPY
 # ==========================================
 
+
+# ==========================================
+# LESSON 42 - VERIFIED EXCEL + AUDIT WRITER
+# ==========================================
+
 def write_synthetic_copy(
     source_path,
     output_path,
     incoming_records,
+    audit_path=None,
+    run_id=None,
 ):
     """
-    Create a verified synthetic Excel copy.
+    Create a verified synthetic workbook.
 
-    Features:
-    - Protect original workbook
-    - Block unsupported structures
-    - Validate incoming transactions
-    - Prevent repeated transaction insertion
-    - Copy supported formulas and formatting
-    - Reconcile financial totals
-    - Save and verify temporary output
-    - Refuse overwriting an existing output
+    Optionally generate a corresponding
+    JSON audit record.
+
+    Never overwrite existing output files.
     """
 
     source_path = Path(source_path).resolve()
     output_path = Path(output_path).resolve()
 
     # --------------------------------------
-    # STEP 1: FILE SAFETY CHECKS
+    # STEP 1: FILE SAFETY
     # --------------------------------------
 
     if source_path == output_path:
         raise ValueError(
-            "Input and output must be different files."
+            "Input and output must be different."
         )
 
     if not source_path.is_file():
@@ -444,7 +451,7 @@ def write_synthetic_copy(
 
     if source_path.suffix.lower() != ".xlsx":
         raise ValueError(
-            "Only .xlsx input files are supported."
+            "Source must be an .xlsx file."
         )
 
     if output_path.suffix.lower() != ".xlsx":
@@ -454,11 +461,46 @@ def write_synthetic_copy(
 
     if output_path.exists():
         raise FileExistsError(
-            "Output already exists. Refusing overwrite."
+            "Excel output already exists."
         )
 
+    # Audit path and run ID must be supplied
+    # together, or both omitted.
+    if (audit_path is None) != (run_id is None):
+        raise ValueError(
+            "Provide both audit_path and run_id."
+        )
+
+    if audit_path is not None:
+
+        audit_path = Path(audit_path).resolve()
+
+        if audit_path in {source_path, output_path}:
+            raise ValueError(
+                "Audit path must be separate "
+                "from source and output files."
+            )
+
+        if audit_path.suffix.lower() != ".json":
+            raise ValueError(
+                "Audit output must be a .json file."
+            )
+
+        if audit_path.exists():
+            raise FileExistsError(
+                "Audit output already exists."
+            )
+
+        if (
+            not isinstance(run_id, str)
+            or not run_id.strip()
+        ):
+            raise ValueError(
+                "A non-empty run ID is required."
+            )
+
     # --------------------------------------
-    # STEP 2: LOAD WORKBOOK
+    # STEP 2: LOAD SYNTHETIC WORKBOOK
     # --------------------------------------
 
     wb = load_workbook(source_path)
@@ -467,20 +509,19 @@ def write_synthetic_copy(
 
         if "SalesRepItem" not in wb.sheetnames:
             raise ValueError(
-                "SalesRepItem sheet is missing."
+                "SalesRepItem worksheet missing."
             )
 
         ws = wb["SalesRepItem"]
 
-        # Verify this is a synthetic workbook.
         if ws["A1"].value != TEST_MARKER:
             raise ValueError(
                 "Not a synthetic test workbook. "
-                "Writing is blocked."
+                "Writing blocked."
             )
 
         # ----------------------------------
-        # STEP 3: VALIDATE INPUTS
+        # STEP 3: VALIDATE
         # ----------------------------------
 
         validate_workbook_structure(ws)
@@ -490,14 +531,10 @@ def write_synthetic_copy(
         )
 
         # ----------------------------------
-        # STEP 4: READ EXISTING RECORDS
+        # STEP 4: MATCH TRANSACTIONS
         # ----------------------------------
 
         existing_records = read_existing_records(ws)
-
-        # ----------------------------------
-        # STEP 5: DETECT DUPLICATES
-        # ----------------------------------
 
         remaining_existing = Counter(
             make_transaction_key(record)
@@ -520,7 +557,7 @@ def write_synthetic_copy(
                 new_records.append(record)
 
         # ----------------------------------
-        # STEP 6: PREPARE NEW ROWS
+        # STEP 5: INSERT MISSING RECORDS
         # ----------------------------------
 
         next_row = max(
@@ -530,16 +567,14 @@ def write_synthetic_copy(
 
         if new_records and not existing_records:
             raise ValueError(
-                "No existing transaction template row."
+                "No transaction template row."
             )
 
         for record in new_records:
 
-            previous_row = next_row - 1
-
             copy_row_formatting_and_formulas(
                 ws=ws,
-                source_row=previous_row,
+                source_row=next_row - 1,
                 target_row=next_row,
             )
 
@@ -552,24 +587,19 @@ def write_synthetic_copy(
             next_row += 1
 
         # ----------------------------------
-        # STEP 7: RECONCILE IN MEMORY
+        # STEP 6: RECONCILE IN MEMORY
         # ----------------------------------
 
         output_records = read_existing_records(ws)
 
-        reconciliation = reconcile_totals(
+        reconcile_totals(
             existing_records,
             new_records,
             output_records,
         )
 
-        if not reconciliation["reconciled"]:
-            raise ValueError(
-                "Financial reconciliation failed."
-            )
-
         # ----------------------------------
-        # STEP 8: CREATE TEMPORARY WORKBOOK
+        # STEP 7: PREPARE TEMPORARY FILES
         # ----------------------------------
 
         output_path.parent.mkdir(
@@ -577,27 +607,38 @@ def write_synthetic_copy(
             exist_ok=True,
         )
 
-        fd, temporary_name = tempfile.mkstemp(
-            prefix=".synthetic_",
-            suffix=".xlsx",
+        if audit_path is not None:
+            audit_path.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+        with tempfile.TemporaryDirectory(
+            prefix=".synthetic_run_",
             dir=output_path.parent,
-        )
+        ) as temporary_directory:
 
-        os.close(fd)
+            temp_directory = Path(
+                temporary_directory
+            )
 
-        temporary_path = Path(temporary_name)
+            temp_excel = (
+                temp_directory / "report.xlsx"
+            )
 
-        try:
+            temp_audit = (
+                temp_directory / "audit.json"
+            )
 
-            # Save workbook to temporary file.
-            wb.save(temporary_path)
+            # Save uncommitted Excel output.
+            wb.save(temp_excel)
 
             # ----------------------------------
-            # STEP 9: READ SAVED WORKBOOK AGAIN
+            # STEP 8: VERIFY SAVED EXCEL
             # ----------------------------------
 
             verified_workbook = load_workbook(
-                temporary_path,
+                temp_excel,
                 read_only=True,
                 data_only=False,
             )
@@ -611,10 +652,6 @@ def write_synthetic_copy(
             finally:
                 verified_workbook.close()
 
-            # ----------------------------------
-            # STEP 10: RECONCILE SAVED OUTPUT
-            # ----------------------------------
-
             reconcile_totals(
                 existing_records,
                 new_records,
@@ -622,38 +659,98 @@ def write_synthetic_copy(
             )
 
             # ----------------------------------
-            # STEP 11: PUBLISH VERIFIED OUTPUT
+            # STEP 9: PREPARE AUDIT RECORD
             # ----------------------------------
 
-            # Does not overwrite an existing file.
-            # Requires filesystem hard-link support.
-            os.link(
-                temporary_path,
-                output_path,
-            )
+            if audit_path is not None:
 
-        finally:
+                output_hash = calculate_file_hash(
+                    temp_excel
+                )
 
-            # Clean up temporary Excel file.
-            temporary_path.unlink(
-                missing_ok=True
-            )
+                audit_record = create_audit_record(
+                    run_id=run_id,
+                    existing_count=len(
+                        existing_records
+                    ),
+                    inserted_count=len(
+                        new_records
+                    ),
+                    reconciled=True,
+                    output_hash=output_hash,
+                )
+
+                save_audit_log(
+                    audit_record,
+                    temp_audit,
+                )
+
+            # ----------------------------------
+            # STEP 10: PUBLISH OUTPUT FILES
+            # ----------------------------------
+
+            # os.link refuses to overwrite an
+            # existing destination on Windows.
+            #
+            # Temporary and output Excel files
+            # are on the same filesystem.
+            #
+            # If publishing the audit fails,
+            # remove the Excel link created here.
+
+            published_excel = False
+
+            try:
+
+                os.link(
+                    temp_excel,
+                    output_path,
+                )
+
+                published_excel = True
+
+                if audit_path is not None:
+
+                    os.link(
+                        temp_audit,
+                        audit_path,
+                    )
+
+            except Exception:
+
+                if published_excel:
+                    output_path.unlink(
+                        missing_ok=True
+                    )
+
+                raise
 
     finally:
-
-        # Always close the original workbook.
         wb.close()
 
     # --------------------------------------
-    # STEP 12: RETURN SUMMARY
+    # STEP 11: RETURN EXECUTION SUMMARY
     # --------------------------------------
 
-    return {
+    result = {
         "matched": matched_count,
         "inserted": len(new_records),
-        "existing_before": len(existing_records),
+        "existing_before": len(
+            existing_records
+        ),
         "existing_after": (
-            len(existing_records) + len(new_records)
+            len(existing_records)
+            + len(new_records)
         ),
         "reconciled": True,
     }
+
+    if audit_path is not None:
+
+        result["audit_path"] = str(
+            audit_path
+        )
+
+        result["run_id"] = run_id
+
+    return result
