@@ -309,7 +309,6 @@ def write_synthetic_copy(
                 "Writing is blocked."
             )
 
-        
         # Validate the synthetic workbook structure.
         validate_workbook_structure(ws)
 
