@@ -167,3 +167,106 @@ def test_financial_decimal_precision():
     assert totals["cost_amount"] == Decimal("0.20")
 
     assert totals["sales_amount"] == Decimal("0.30")
+
+
+# ==========================================
+# LESSON 38 - ADVANCED INTEGRITY TESTS
+# ==========================================
+
+from datetime import datetime
+
+
+# TEST 7: DUPLICATE OCCURRENCE PROTECTION
+
+def test_duplicate_occurrence_mismatch():
+
+    existing = [
+        detailed_sale("TEST001", 1500),
+        detailed_sale("TEST001", 1500),
+    ]
+
+    output = [
+        detailed_sale("TEST001", 1500),
+        detailed_sale("TEST002", 1500),
+    ]
+
+    # Totals and row counts match,
+    # but the transactions are different.
+    with pytest.raises(ValueError):
+        reconcile_totals(existing, [], output)
+
+
+# TEST 8: DETECT REPLACED TRANSACTION
+
+def test_replaced_transaction_same_amount():
+
+    existing = [
+        detailed_sale("TEST001", 2500),
+    ]
+
+    output = [
+        detailed_sale("TEST999", 2500),
+    ]
+
+    with pytest.raises(ValueError):
+        reconcile_totals(existing, [], output)
+
+
+# TEST 9: ACCEPT EQUIVALENT DECIMAL VALUES
+
+def test_equivalent_decimal_values():
+
+    existing = [
+        detailed_sale(
+            "TEST001",
+            Decimal("1500.25"),
+        ),
+    ]
+
+    output = [
+        detailed_sale(
+            "TEST001",
+            Decimal("1500.250"),
+        ),
+    ]
+
+    result = reconcile_totals(
+        existing,
+        [],
+        output,
+    )
+
+    assert result["reconciled"] is True
+
+
+# TEST 10: ACCEPT EQUIVALENT DATE VALUES
+
+def test_equivalent_date_representations():
+
+    existing = [
+        {
+            "bill_no": "TEST001",
+            "sold_qty": 1,
+            "cost_amount": 1000,
+            "sales_amount": 1500,
+            "date": "2026-10-10",
+        },
+    ]
+
+    output = [
+        {
+            "bill_no": "TEST001",
+            "sold_qty": 1,
+            "cost_amount": 1000,
+            "sales_amount": 1500,
+            "date": datetime(2026, 10, 10),
+        },
+    ]
+
+    result = reconcile_totals(
+        existing,
+        [],
+        output,
+    )
+
+    assert result["reconciled"] is True
