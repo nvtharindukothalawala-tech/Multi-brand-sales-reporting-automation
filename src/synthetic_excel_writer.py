@@ -273,6 +273,8 @@ def write_synthetic_copy(
                     reconciled=True,
                     output_hash=output_hash,
                 )
+                # Version 2 requires independent financial-total verification.
+                audit_record["audit_schema_version"] = 2
                 # Use verified, saved workbook values as the audit source.
                 audit_record["financial_totals"] = {
                     field: str(value)

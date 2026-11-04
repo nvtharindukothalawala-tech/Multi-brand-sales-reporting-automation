@@ -56,6 +56,14 @@ def verify_audit_integrity(excel_path, audit_path):
     if not isinstance(audit_record, dict):
         raise ValueError("Audit JSON must contain an object.")
 
+    # Unversioned records are legacy and may not contain financial totals.
+    # Version 2 is strict: all three totals must be present and valid.
+    schema_version = audit_record.get("audit_schema_version", 1)
+    if type(schema_version) is not int or schema_version not in (1, 2):
+        raise ValueError("Unsupported audit schema version.")
+    if schema_version == 2 and "financial_totals" not in audit_record:
+        raise ValueError("Version 2 audit is missing financial totals.")
+
     if audit_record.get("report_type") != SYNTHETIC_MARKER:
         raise ValueError("Audit report type is invalid.")
     if audit_record.get("reconciled") is not True:
@@ -103,6 +111,7 @@ def verify_audit_integrity(excel_path, audit_path):
         "existing_count": existing_count,
         "inserted_count": inserted_count,
         "final_count": final_count,
+        "audit_schema_version": schema_version,
     }
 
 
@@ -191,6 +200,10 @@ def verify_workbook_audit(excel_path, audit_path):
         with Path(audit_path).open("r", encoding="utf-8") as audit_file:
             stored_audit = json.load(audit_file)
         stored_totals = stored_audit.get("financial_totals")
+        if result["audit_schema_version"] == 2 and stored_totals is None:
+            raise ValueError("Version 2 audit is missing financial totals.")
+        if "financial_totals" in stored_audit and stored_totals is None:
+            raise ValueError("Audit financial totals must not be null.")
         if stored_totals is not None:
             if not isinstance(stored_totals, dict) or set(stored_totals) != set(actual_financial_totals):
                 raise ValueError("Invalid audit financial totals structure.")
@@ -217,4 +230,6 @@ def verify_workbook_audit(excel_path, audit_path):
     result["transaction_count_verified"] = True
     result["transaction_fields_verified"] = True
     result["financial_totals_checked"] = stored_totals is not None
+    result["financial_totals_verified"] = stored_totals is not None
+    result["legacy_audit"] = result["audit_schema_version"] == 1
     return result
