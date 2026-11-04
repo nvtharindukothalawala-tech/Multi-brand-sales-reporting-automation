@@ -38,3 +38,5 @@ config/reporting_scope_review.csv
 .DS_Store
 Thumbs.db
 recovery_report.json
+
+recovery_lesson*.json
