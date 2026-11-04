@@ -10,6 +10,9 @@ from pathlib import Path
 
 from src.audit_logging import calculate_file_hash
 
+from zipfile import BadZipFile
+
+from openpyxl import load_workbook
 
 # ==========================================
 # 1. VERIFY AUDIT INTEGRITY
@@ -102,7 +105,6 @@ def verify_audit_integrity(
             "Audit status is not VERIFIED."
         )
 
-    
     # --------------------------------------
     # CHECK 6: TRANSACTION COUNT VALIDATION
     # --------------------------------------
@@ -198,3 +200,105 @@ def verify_audit_integrity(
             "final_count"
         ),
     }
+# ==========================================
+# LESSON 49
+# SYNTHETIC WORKBOOK AUDIT VERIFICATION
+# ==========================================
+
+def verify_workbook_audit(
+    excel_path,
+    audit_path,
+):
+    """
+    Verify the integrity and structure
+    of a synthetic Excel workbook.
+
+    Checks:
+    1. Audit checksum and metadata
+    2. XLSX file extension
+    3. Valid Excel workbook
+    4. Required SalesRepItem worksheet
+    5. Synthetic marker in cell A1
+    """
+
+    excel_path = Path(excel_path)
+
+    # --------------------------------------
+    # CHECK 1: AUDIT INTEGRITY
+    # --------------------------------------
+
+    result = verify_audit_integrity(
+        excel_path,
+        audit_path,
+    )
+
+    # --------------------------------------
+    # CHECK 2: XLSX EXTENSION
+    # --------------------------------------
+
+    if excel_path.suffix.lower() != ".xlsx":
+        raise ValueError(
+            "Expected an .xlsx workbook."
+        )
+
+    # --------------------------------------
+    # CHECK 3: OPEN THE WORKBOOK
+    # --------------------------------------
+
+    try:
+        workbook = load_workbook(
+            excel_path,
+            read_only=True,
+            data_only=False,
+        )
+
+    except (
+        BadZipFile,
+        OSError,
+        ValueError,
+        KeyError,
+    ) as error:
+        raise ValueError(
+            "Invalid or unreadable Excel workbook."
+        ) from error
+
+    try:
+
+        # ----------------------------------
+        # CHECK 4: REQUIRED WORKSHEET
+        # ----------------------------------
+
+        if "SalesRepItem" not in workbook.sheetnames:
+            raise ValueError(
+                "Required SalesRepItem "
+                "worksheet is missing."
+            )
+
+        worksheet = workbook["SalesRepItem"]
+
+        # ----------------------------------
+        # CHECK 5: SYNTHETIC MARKER
+        # ----------------------------------
+
+        if worksheet["A1"].value != (
+            "SYNTHETIC_TEST_ONLY"
+        ):
+            raise ValueError(
+                "Synthetic workbook marker "
+                "is missing or incorrect."
+            )
+
+    finally:
+
+        # Always close the workbook.
+        workbook.close()
+
+    # --------------------------------------
+    # VERIFICATION SUCCESSFUL
+    # --------------------------------------
+
+    result["workbook_verified"] = True
+    result["required_sheet"] = "SalesRepItem"
+    result["synthetic_marker_verified"] = True
+
+    return result
