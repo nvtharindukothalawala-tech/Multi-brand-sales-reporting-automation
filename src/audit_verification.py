@@ -1,11 +1,10 @@
-
 # ==========================================
 # AUDIT INTEGRITY VERIFICATION ENGINE
-# LESSON 52 - COMPLETE VERSION
+# LESSON 54 - COMPLETE VERSION
 # ==========================================
 
 import json
-
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from zipfile import BadZipFile
 
@@ -14,185 +13,92 @@ from openpyxl import load_workbook
 from src.audit_logging import calculate_file_hash
 
 
-# ==========================================
-# 1. VERIFY AUDIT INTEGRITY
-# ==========================================
+SYNTHETIC_MARKER = "SYNTHETIC_TEST_ONLY"
+SALES_SHEET = "SalesRepItem"
 
-def verify_audit_integrity(
-    excel_path,
-    audit_path,
-):
-    """
-    Verify a synthetic report against its
-    JSON audit record.
+# Column numbers are 1-based (Z=26, AO=41, AZ=52).
+REQUIRED_COLUMNS = {
+    "bill_no": 26,
+    "product": 41,
+    "cost_price": 42,
+    "sales_price": 43,
+    "sold_qty": 46,
+    "cost_amount": 47,
+    "sales_amount": 48,
+    "date": 52,
+}
 
-    Checks:
-    1. Required files exist
-    2. Audit JSON is valid
-    3. Report type is synthetic
-    4. Financial reconciliation succeeded
-    5. Audit status is VERIFIED
-    6. Transaction counts are valid
-    7. Transaction counts are consistent
-    8. Recorded checksum is valid
-    9. Actual checksum matches the audit
-    """
+NUMERIC_FIELDS = {
+    "cost_price",
+    "sales_price",
+    "sold_qty",
+    "cost_amount",
+    "sales_amount",
+}
 
+
+def verify_audit_integrity(excel_path, audit_path):
+    """Check audit metadata, transaction counts, and the report checksum."""
     excel_path = Path(excel_path)
     audit_path = Path(audit_path)
 
-    # --------------------------------------
-    # CHECK 1: REQUIRED FILES EXIST
-    # --------------------------------------
-
     if not excel_path.is_file():
-        raise FileNotFoundError(
-            f"Excel report not found: {excel_path}"
-        )
-
+        raise FileNotFoundError(f"Excel report not found: {excel_path}")
     if not audit_path.is_file():
-        raise FileNotFoundError(
-            f"Audit file not found: {audit_path}"
-        )
-
-    # --------------------------------------
-    # CHECK 2: READ AUDIT JSON
-    # --------------------------------------
+        raise FileNotFoundError(f"Audit file not found: {audit_path}")
 
     try:
-        with open(
-            audit_path,
-            "r",
-            encoding="utf-8",
-        ) as file:
+        with audit_path.open("r", encoding="utf-8") as file:
             audit_record = json.load(file)
-
     except json.JSONDecodeError:
-        raise ValueError(
-            "Audit file contains invalid JSON."
-        ) from None
+        raise ValueError("Audit file contains invalid JSON.") from None
 
     if not isinstance(audit_record, dict):
-        raise ValueError(
-            "Audit JSON must contain an object."
-        )
+        raise ValueError("Audit JSON must contain an object.")
 
-    # --------------------------------------
-    # CHECK 3: SYNTHETIC REPORT TYPE
-    # --------------------------------------
-
-    if audit_record.get("report_type") != (
-        "SYNTHETIC_TEST_ONLY"
-    ):
-        raise ValueError(
-            "Audit report type is invalid."
-        )
-
-    # --------------------------------------
-    # CHECK 4: RECONCILIATION STATUS
-    # --------------------------------------
-
+    if audit_record.get("report_type") != SYNTHETIC_MARKER:
+        raise ValueError("Audit report type is invalid.")
     if audit_record.get("reconciled") is not True:
-        raise ValueError(
-            "Audit reconciliation was not successful."
-        )
-
-    # --------------------------------------
-    # CHECK 5: AUDIT STATUS
-    # --------------------------------------
-
+        raise ValueError("Audit reconciliation was not successful.")
     if audit_record.get("status") != "VERIFIED":
-        raise ValueError(
-            "Audit status is not VERIFIED."
-        )
+        raise ValueError("Audit status is not VERIFIED.")
 
-    # --------------------------------------
-    # CHECK 6: VALIDATE TRANSACTION COUNTS
-    # --------------------------------------
-
-    count_fields = (
-        "existing_count",
-        "inserted_count",
-        "final_count",
-    )
-
-    for field in count_fields:
-
+    for field in ("existing_count", "inserted_count", "final_count"):
         value = audit_record.get(field)
-
-        # Reject missing, negative, decimal,
-        # string, and boolean count values.
-        if (
-            type(value) is not int
-            or value < 0
-        ):
-            raise ValueError(
-                f"Invalid audit transaction count: "
-                f"{field}"
-            )
-
-    # --------------------------------------
-    # CHECK 7: COUNT CONSISTENCY
-    # --------------------------------------
+        if type(value) is not int or value < 0:
+            raise ValueError(f"Invalid audit transaction count: {field}")
 
     existing_count = audit_record["existing_count"]
     inserted_count = audit_record["inserted_count"]
     final_count = audit_record["final_count"]
 
-    expected_final_count = (
-        existing_count + inserted_count
-    )
-
+    expected_final_count = existing_count + inserted_count
     if final_count != expected_final_count:
         raise ValueError(
             "Audit transaction count mismatch: "
-            f"expected {expected_final_count}, "
-            f"found {final_count}."
+            f"expected {expected_final_count}, found {final_count}."
         )
 
-    # --------------------------------------
-    # CHECK 8: RECORDED CHECKSUM
-    # --------------------------------------
-
-    recorded_hash = audit_record.get(
-        "output_sha256"
-    )
-
+    recorded_hash = audit_record.get("output_sha256")
     if (
         not isinstance(recorded_hash, str)
         or len(recorded_hash) != 64
-        or any(
-            character not in "0123456789abcdef"
-            for character in recorded_hash.lower()
-        )
+        or any(character not in "0123456789abcdef" for character in recorded_hash.lower())
     ):
-        raise ValueError(
-            "Audit contains an invalid SHA-256 checksum."
-        )
+        raise ValueError("Audit contains an invalid SHA-256 checksum.")
 
-    # --------------------------------------
-    # CHECK 9: CALCULATE ACTUAL CHECKSUM
-    # --------------------------------------
-
-    actual_hash = calculate_file_hash(
-        excel_path
-    )
-
+    actual_hash = calculate_file_hash(excel_path)
     if actual_hash.lower() != recorded_hash.lower():
         raise ValueError(
             "Audit integrity verification failed: "
             "Excel file checksum does not match."
         )
 
-    # --------------------------------------
-    # VERIFICATION SUCCESSFUL
-    # --------------------------------------
-
     return {
         "verified": True,
         "run_id": audit_record.get("run_id"),
         "status": "VERIFIED",
-        "report_type": "SYNTHETIC_TEST_ONLY",
+        "report_type": SYNTHETIC_MARKER,
         "output_sha256": actual_hash,
         "existing_count": existing_count,
         "inserted_count": inserted_count,
@@ -200,51 +106,36 @@ def verify_audit_integrity(
     }
 
 
-# ==========================================
-# 2. VERIFY SYNTHETIC EXCEL WORKBOOK
-# ==========================================
+def _validate_transaction_row(row, row_number):
+    """Validate required fields in one synthetic transaction row."""
+    for field, column_number in REQUIRED_COLUMNS.items():
+        value = row[column_number - 1]
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise ValueError(
+                f"Invalid transaction at row {row_number}: missing {field}."
+            )
 
-def verify_workbook_audit(
-    excel_path,
-    audit_path,
-):
-    """
-    Verify the integrity and structure
-    of a synthetic Excel workbook.
+        if field in NUMERIC_FIELDS:
+            if isinstance(value, bool):
+                raise ValueError(f"Invalid {field} at row {row_number}.")
+            try:
+                number = Decimal(str(value))
+                if not number.is_finite():
+                    raise ValueError("Non-finite number")
+            except (InvalidOperation, ValueError, TypeError):
+                raise ValueError(f"Invalid {field} at row {row_number}.") from None
 
-    Checks:
-    1. Audit JSON and SHA-256 checksum
-    2. XLSX file extension
-    3. Excel workbook is readable
-    4. SalesRepItem worksheet exists
-    5. Synthetic marker exists in A1
-    6. Count actual Excel transactions
-    7. Compare actual count with audit
-    """
+            if field == "sold_qty" and number <= 0:
+                raise ValueError(f"Invalid sold quantity at row {row_number}.")
 
+
+def verify_workbook_audit(excel_path, audit_path):
+    """Verify audit integrity, Excel structure and required transaction values."""
     excel_path = Path(excel_path)
-
-    # --------------------------------------
-    # CHECK 1: AUDIT INTEGRITY
-    # --------------------------------------
-
-    result = verify_audit_integrity(
-        excel_path,
-        audit_path,
-    )
-
-    # --------------------------------------
-    # CHECK 2: XLSX EXTENSION
-    # --------------------------------------
+    result = verify_audit_integrity(excel_path, audit_path)
 
     if excel_path.suffix.lower() != ".xlsx":
-        raise ValueError(
-            "Expected an .xlsx workbook."
-        )
-
-    # --------------------------------------
-    # CHECK 3: OPEN THE WORKBOOK
-    # --------------------------------------
+        raise ValueError("Expected an .xlsx workbook.")
 
     try:
         workbook = load_workbook(
@@ -252,109 +143,78 @@ def verify_workbook_audit(
             read_only=True,
             data_only=False,
         )
-
-    except (
-        BadZipFile,
-        OSError,
-        ValueError,
-        KeyError,
-    ) as error:
-        raise ValueError(
-            "Invalid or unreadable Excel workbook."
-        ) from error
+    except (BadZipFile, OSError, ValueError, KeyError) as error:
+        raise ValueError("Invalid or unreadable Excel workbook.") from error
 
     try:
+        if SALES_SHEET not in workbook.sheetnames:
+            raise ValueError("Required SalesRepItem worksheet is missing.")
 
-        # ----------------------------------
-        # CHECK 4: REQUIRED WORKSHEET
-        # ----------------------------------
-
-        if "SalesRepItem" not in workbook.sheetnames:
-            raise ValueError(
-                "Required SalesRepItem "
-                "worksheet is missing."
-            )
-
-        worksheet = workbook["SalesRepItem"]
-
-        # ----------------------------------
-        # CHECK 5: SYNTHETIC MARKER
-        # ----------------------------------
-
-        if worksheet["A1"].value != (
-            "SYNTHETIC_TEST_ONLY"
-        ):
-            raise ValueError(
-                "Synthetic workbook marker "
-                "is missing or incorrect."
-            )
-
-        # ----------------------------------
-        # CHECK 6: COUNT ACTUAL TRANSACTIONS
-        # ----------------------------------
-
-        # Transaction records begin at row 5.
-        # Bill numbers are stored in column Z.
-        #
-        # Column Z = Excel column number 26.
+        worksheet = workbook[SALES_SHEET]
+        if worksheet["A1"].value != SYNTHETIC_MARKER:
+            raise ValueError("Synthetic workbook marker is missing or incorrect.")
 
         actual_transaction_count = 0
-
-        for row in worksheet.iter_rows(
-            min_row=5,
-            min_col=26,
-            max_col=26,
-            values_only=True,
+        actual_financial_totals = {
+            "sold_qty": Decimal("0"),
+            "cost_amount": Decimal("0"),
+            "sales_amount": Decimal("0"),
+        }
+        for row_number, row in enumerate(
+            worksheet.iter_rows(
+                min_row=5,
+                min_col=1,
+                max_col=52,
+                values_only=True,
+            ),
+            start=5,
         ):
+            bill_no = row[REQUIRED_COLUMNS["bill_no"] - 1]
+            if bill_no is None or (isinstance(bill_no, str) and not bill_no.strip()):
+                continue
 
-            bill_no = row[0]
+            _validate_transaction_row(row, row_number)
+            for field in actual_financial_totals:
+                cell_value = row[REQUIRED_COLUMNS[field] - 1]
+                actual_financial_totals[field] += Decimal(str(cell_value))
+            actual_transaction_count += 1
 
-            # Only count rows with
-            # a non-empty Bill Number.
-            if (
-                bill_no is not None
-                and str(bill_no).strip() != ""
-            ):
-                actual_transaction_count += 1
-
-        # ----------------------------------
-        # CHECK 7: COMPARE WITH AUDIT COUNT
-        # ----------------------------------
-
-        expected_transaction_count = (
-            result["final_count"]
-        )
-
-        if (
-            actual_transaction_count
-            != expected_transaction_count
-        ):
+        expected_count = result["final_count"]
+        if actual_transaction_count != expected_count:
             raise ValueError(
                 "Workbook transaction count mismatch: "
-                f"Audit expected "
-                f"{expected_transaction_count}, "
-                f"Excel contains "
-                f"{actual_transaction_count}."
+                f"Audit expected {expected_count}, "
+                f"Excel contains {actual_transaction_count}."
             )
 
+        # Old audit records have no totals; new ones are checked strictly.
+        with Path(audit_path).open("r", encoding="utf-8") as audit_file:
+            stored_audit = json.load(audit_file)
+        stored_totals = stored_audit.get("financial_totals")
+        if stored_totals is not None:
+            if not isinstance(stored_totals, dict) or set(stored_totals) != set(actual_financial_totals):
+                raise ValueError("Invalid audit financial totals structure.")
+            for field, actual in actual_financial_totals.items():
+                recorded = stored_totals[field]
+                if not isinstance(recorded, str):
+                    raise ValueError(f"Invalid recorded financial total: {field}.")
+                try:
+                    expected = Decimal(recorded)
+                except InvalidOperation:
+                    raise ValueError(f"Invalid recorded financial total: {field}.") from None
+                if not expected.is_finite() or expected != actual:
+                    raise ValueError(
+                        f"Workbook financial total mismatch for {field}: "
+                        f"audit={recorded}, workbook={actual}."
+                    )
     finally:
-
-        # Always close the workbook.
         workbook.close()
 
-    # --------------------------------------
-    # VERIFICATION SUCCESSFUL
-    # --------------------------------------
-
     result["workbook_verified"] = True
-    result["required_sheet"] = "SalesRepItem"
+    result["required_sheet"] = SALES_SHEET
     result["synthetic_marker_verified"] = True
-
-    # Additional verification metadata
-    result["actual_transaction_count"] = (
-        actual_transaction_count
-    )
-
+    result["actual_transaction_count"] = actual_transaction_count
     result["transaction_count_verified"] = True
-
+    result["transaction_fields_verified"] = True
+    result["financial_totals_checked"] = stored_totals is not None
     return result

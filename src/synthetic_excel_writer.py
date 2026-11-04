@@ -1,35 +1,27 @@
+"""Synthetic-only Excel writer with transaction checks and optional audit JSON.
 
-# ==========================================
-# SYNTHETIC EXCEL WRITING ENGINE
-# LESSON 35 - COMPLETE VERSION
-# ==========================================
+This module is for test workbooks marked SYNTHETIC_TEST_ONLY, not production reports.
+"""
 
 import os
 import tempfile
-
 from collections import Counter
 from copy import copy
-from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import pandas as pd
-
 from openpyxl import load_workbook
 from openpyxl.formula.translate import Translator
-
-from src.transaction_matching import make_transaction_key
-from src.financial_validation import reconcile_totals
 
 from src.audit_logging import (
     calculate_file_hash,
     create_audit_record,
     save_audit_log,
 )
+from src.financial_validation import reconcile_totals, calculate_totals
+from src.transaction_matching import make_transaction_key
 
-# ==========================================
-# 1. SYNTHETIC WORKBOOK CONFIGURATION
-# ==========================================
 
 TEST_MARKER = "SYNTHETIC_TEST_ONLY"
 
@@ -44,6 +36,7 @@ COLUMN_MAP = {
     "date": "AZ",
 }
 
+# Zero-based indexes for tuples returned by openpyxl.iter_rows(values_only=True).
 COLUMN_INDEXES = {
     "bill_no": 25,
     "product": 40,
@@ -56,367 +49,117 @@ COLUMN_INDEXES = {
 }
 
 
-# ==========================================
-# 2. READ EXISTING TRANSACTIONS
-# ==========================================
-
 def read_existing_records(ws):
-    """
-    Read transaction records from the
-    synthetic Excel worksheet.
-    """
-
+    """Read the eight transaction fields, starting at worksheet row 5."""
     records = []
-
-    for row in ws.iter_rows(
-        min_row=5,
-        values_only=True,
-    ):
-
+    for row in ws.iter_rows(min_row=5, values_only=True):
         if len(row) < 52 or row[25] is None:
             continue
-
-        record = {
-            field: row[index]
-            for field, index in COLUMN_INDEXES.items()
-        }
-
-        records.append(record)
-
+        records.append({
+            field: row[index] for field, index in COLUMN_INDEXES.items()
+        })
     return records
 
 
-# ==========================================
-# 3. VALIDATE WORKBOOK STRUCTURE
-# ==========================================
-
 def validate_workbook_structure(ws):
-    """
-    Reject unsupported Excel structures.
-
-    This validation does not change
-    the original worksheet.
-    """
-
-    # --------------------------------------
-    # CHECK 1: EXCEL TABLES
-    # --------------------------------------
-
-    if len(ws.tables) > 0:
-        raise ValueError(
-            "Structured Excel tables are not "
-            "supported by this writer."
-        )
-
-    # --------------------------------------
-    # CHECK 2: MERGED CELLS
-    # --------------------------------------
+    """Reject unsupported structures in a controlled synthetic worksheet."""
+    if ws.tables:
+        raise ValueError("Structured Excel tables are not supported by this writer.")
 
     for merged_range in ws.merged_cells.ranges:
-
-        intersects_transaction_area = (
-            merged_range.max_row >= 5
-            and merged_range.min_col <= 52
-        )
-
-        if intersects_transaction_area:
+        if merged_range.max_row >= 5 and merged_range.min_col <= 52:
             raise ValueError(
-                "Merged cells detected in "
-                "the transaction area: "
-                f"{merged_range}"
+                f"Merged cells detected in the transaction area: {merged_range}"
             )
 
-    # --------------------------------------
-    # CHECK 3: FOOTER AND TOTAL ROWS
-    # --------------------------------------
-
-    footer_labels = {
-        "TOTAL",
-        "GRAND TOTAL",
-        "SUBTOTAL",
-        "SUMMARY",
-    }
-
+    footer_labels = {"TOTAL", "GRAND TOTAL", "SUBTOTAL", "SUMMARY"}
     for row_number in range(5, ws.max_row + 1):
-
         bill_no = ws[f"Z{row_number}"].value
-
-        if isinstance(bill_no, str):
-
-            if bill_no.strip().upper() in footer_labels:
-                raise ValueError(
-                    "Footer or total row detected "
-                    f"at row {row_number}."
-                )
+        if isinstance(bill_no, str) and bill_no.strip().upper() in footer_labels:
+            raise ValueError(f"Footer or total row detected at row {row_number}.")
 
         has_content = any(
-            ws.cell(
-                row=row_number,
-                column=column,
-            ).value is not None
+            ws.cell(row=row_number, column=column).value is not None
             for column in range(1, 53)
         )
-
-        if not has_content:
-            continue
-
-        if bill_no is None or str(bill_no).strip() == "":
+        if has_content and (bill_no is None or not str(bill_no).strip()):
             raise ValueError(
-                "Unsupported non-transaction row "
-                f"detected at row {row_number}."
+                f"Unsupported non-transaction row detected at row {row_number}."
             )
-
     return True
 
-
-# ==========================================
-# 4. VALIDATE INCOMING TRANSACTIONS
-# ==========================================
 
 def validate_incoming_transactions(records):
-    """
-    Validate every incoming transaction
-    before preparing any Excel changes.
-    """
-
-    required_fields = {
-        "bill_no",
-        "product",
-        "sold_qty",
-        "cost_price",
-        "sales_price",
-        "cost_amount",
-        "sales_amount",
-        "date",
-    }
-
+    """Validate the complete incoming batch before any worksheet modifications."""
+    required_fields = set(COLUMN_MAP)
     numeric_fields = {
-        "sold_qty",
-        "cost_price",
-        "sales_price",
-        "cost_amount",
-        "sales_amount",
+        "sold_qty", "cost_price", "sales_price", "cost_amount", "sales_amount"
     }
-
     if not records:
-        raise ValueError(
-            "No incoming transactions provided."
-        )
+        raise ValueError("No incoming transactions provided.")
 
-    for row_number, record in enumerate(
-        records,
-        start=1,
-    ):
-
-        # ----------------------------------
-        # CHECK 1: RECORD TYPE
-        # ----------------------------------
-
+    for row_number, record in enumerate(records, start=1):
         if not isinstance(record, dict):
-            raise ValueError(
-                f"Transaction {row_number}: "
-                "Record must be a dictionary."
-            )
+            raise ValueError(f"Transaction {row_number}: Record must be a dictionary.")
 
-        # ----------------------------------
-        # CHECK 2: REQUIRED FIELDS
-        # ----------------------------------
-
-        missing_fields = (
-            required_fields - set(record.keys())
-        )
-
+        missing_fields = required_fields - set(record)
         if missing_fields:
             raise ValueError(
-                f"Transaction {row_number}: "
-                f"Missing fields: {sorted(missing_fields)}"
+                f"Transaction {row_number}: Missing fields: {sorted(missing_fields)}"
             )
 
-        # ----------------------------------
-        # CHECK 3: TEXT VALUES
-        # ----------------------------------
-
-        for field in ["bill_no", "product"]:
-
+        for field in ("bill_no", "product"):
             value = record[field]
-
-            if (
-                value is None
-                or not str(value).strip()
-                or pd.isna(value)
-            ):
-                raise ValueError(
-                    f"Transaction {row_number}: "
-                    f"Invalid {field}."
-                )
-
-        # ----------------------------------
-        # CHECK 4: NUMERIC VALUES
-        # ----------------------------------
+            if value is None or not str(value).strip() or pd.isna(value):
+                raise ValueError(f"Transaction {row_number}: Invalid {field}.")
 
         for field in numeric_fields:
-
             value = record[field]
-
-            if (
-                value is None
-                or isinstance(value, bool)
-                or pd.isna(value)
-            ):
-                raise ValueError(
-                    f"Transaction {row_number}: "
-                    f"Invalid {field}."
-                )
-
+            if value is None or isinstance(value, bool) or pd.isna(value):
+                raise ValueError(f"Transaction {row_number}: Invalid {field}.")
             try:
-                number = Decimal(
-                    str(value).strip()
-                )
-
-            except (InvalidOperation, ValueError):
-                raise ValueError(
-                    f"Transaction {row_number}: "
-                    f"Invalid {field}."
-                ) from None
-
+                number = Decimal(str(value).strip())
+            except (InvalidOperation, ValueError, TypeError):
+                raise ValueError(f"Transaction {row_number}: Invalid {field}.") from None
             if not number.is_finite():
-                raise ValueError(
-                    f"Transaction {row_number}: "
-                    f"Non-finite {field}."
-                )
-
+                raise ValueError(f"Transaction {row_number}: Non-finite {field}.")
             if field == "sold_qty" and number <= 0:
                 raise ValueError(
-                    f"Transaction {row_number}: "
-                    "Sold quantity must be positive."
+                    f"Transaction {row_number}: Sold quantity must be positive."
                 )
 
-        # ----------------------------------
-        # CHECK 5: TRANSACTION DATE
-        # ----------------------------------
-
         transaction_date = record["date"]
-
-        if (
-            transaction_date is None
-            or pd.isna(transaction_date)
-        ):
-            raise ValueError(
-                f"Transaction {row_number}: "
-                "Missing transaction date."
-            )
-
+        if transaction_date is None or pd.isna(transaction_date):
+            raise ValueError(f"Transaction {row_number}: Missing transaction date.")
         try:
-            parsed_date = pd.to_datetime(
-                transaction_date,
-                errors="raise",
-            )
-
+            parsed_date = pd.to_datetime(transaction_date, errors="raise")
             if pd.isna(parsed_date):
                 raise ValueError("Invalid date")
-
-        except (
-            ValueError,
-            TypeError,
-            OverflowError,
-        ):
-            raise ValueError(
-                f"Transaction {row_number}: "
-                "Invalid transaction date."
-            ) from None
-
+        except (ValueError, TypeError, OverflowError):
+            raise ValueError(f"Transaction {row_number}: Invalid transaction date.") from None
     return True
 
 
-# ==========================================
-# 5. COPY FORMULAS AND FORMATTING
-# ==========================================
-
-def copy_row_formatting_and_formulas(
-    ws,
-    source_row,
-    target_row,
-):
-    """
-    Copy styles into a new synthetic row.
-
-    Translate formulas in columns A:Y.
-    Do not copy fixed transaction values.
-    """
-
+def copy_row_formatting_and_formulas(ws, source_row, target_row):
+    """Copy styles A:AZ and translate formulas in calculated columns A:Y."""
     for column in range(1, 53):
-
-        source_cell = ws.cell(
-            row=source_row,
-            column=column,
-        )
-
-        target_cell = ws.cell(
-            row=target_row,
-            column=column,
-        )
-
-        # ----------------------------------
-        # COPY CELL FORMATTING
-        # ----------------------------------
-
+        source_cell = ws.cell(row=source_row, column=column)
+        target_cell = ws.cell(row=target_row, column=column)
         if source_cell.has_style:
-
-            target_cell.font = copy(
-                source_cell.font
-            )
-
-            target_cell.fill = copy(
-                source_cell.fill
-            )
-
-            target_cell.border = copy(
-                source_cell.border
-            )
-
-            target_cell.alignment = copy(
-                source_cell.alignment
-            )
-
-            target_cell.protection = copy(
-                source_cell.protection
-            )
-
-            target_cell.number_format = (
-                source_cell.number_format
-            )
-
-        # ----------------------------------
-        # TRANSLATE CALCULATED FORMULAS
-        # ----------------------------------
+            target_cell.font = copy(source_cell.font)
+            target_cell.fill = copy(source_cell.fill)
+            target_cell.border = copy(source_cell.border)
+            target_cell.alignment = copy(source_cell.alignment)
+            target_cell.protection = copy(source_cell.protection)
+            target_cell.number_format = source_cell.number_format
 
         if column <= 25:
-
             formula = source_cell.value
+            if isinstance(formula, str) and formula.startswith("="):
+                target_cell.value = Translator(
+                    formula, origin=source_cell.coordinate
+                ).translate_formula(target_cell.coordinate)
 
-            if (
-                isinstance(formula, str)
-                and formula.startswith("=")
-            ):
-
-                translated_formula = Translator(
-                    formula,
-                    origin=source_cell.coordinate,
-                ).translate_formula(
-                    target_cell.coordinate
-                )
-
-                target_cell.value = translated_formula
-
-
-# ==========================================
-# 6. WRITE SYNTHETIC WORKBOOK COPY
-# ==========================================
-
-
-# ==========================================
-# LESSON 42 - VERIFIED EXCEL + AUDIT WRITER
-# ==========================================
 
 def write_synthetic_copy(
     source_path,
@@ -425,332 +168,144 @@ def write_synthetic_copy(
     audit_path=None,
     run_id=None,
 ):
+    """Create a verified synthetic workbook and optionally a JSON audit file.
+
+    Output paths must be new. Each temporary file is created on the same
+    filesystem as its destination for safe, non-overwriting hard links.
+    A failed second publication triggers a best-effort Excel rollback.
     """
-    Create a verified synthetic workbook.
-
-    Optionally generate a corresponding
-    JSON audit record.
-
-    Never overwrite existing output files.
-    """
-
     source_path = Path(source_path).resolve()
     output_path = Path(output_path).resolve()
 
-    # --------------------------------------
-    # STEP 1: FILE SAFETY
-    # --------------------------------------
-
     if source_path == output_path:
-        raise ValueError(
-            "Input and output must be different."
-        )
-
+        raise ValueError("Input and output must be different files.")
     if not source_path.is_file():
         raise FileNotFoundError(source_path)
-
     if source_path.suffix.lower() != ".xlsx":
-        raise ValueError(
-            "Source must be an .xlsx file."
-        )
-
+        raise ValueError("Only .xlsx input files are supported.")
     if output_path.suffix.lower() != ".xlsx":
-        raise ValueError(
-            "Output must be an .xlsx file."
-        )
-
+        raise ValueError("Output must be an .xlsx file.")
     if output_path.exists():
-        raise FileExistsError(
-            "Excel output already exists."
-        )
+        raise FileExistsError("Output already exists. Refusing overwrite.")
 
-    # Audit path and run ID must be supplied
-    # together, or both omitted.
     if (audit_path is None) != (run_id is None):
-        raise ValueError(
-            "Provide both audit_path and run_id."
-        )
-
+        raise ValueError("Provide both audit_path and run_id, or neither.")
     if audit_path is not None:
-
         audit_path = Path(audit_path).resolve()
-
         if audit_path in {source_path, output_path}:
-            raise ValueError(
-                "Audit path must be separate "
-                "from source and output files."
-            )
-
+            raise ValueError("Audit path must differ from source and Excel output.")
         if audit_path.suffix.lower() != ".json":
-            raise ValueError(
-                "Audit output must be a .json file."
-            )
-
+            raise ValueError("Audit output must be a .json file.")
         if audit_path.exists():
-            raise FileExistsError(
-                "Audit output already exists."
-            )
-
-        if (
-            not isinstance(run_id, str)
-            or not run_id.strip()
-        ):
-            raise ValueError(
-                "A non-empty run ID is required."
-            )
-
-    # --------------------------------------
-    # STEP 2: LOAD SYNTHETIC WORKBOOK
-    # --------------------------------------
+            raise FileExistsError("Audit output already exists. Refusing overwrite.")
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ValueError("A non-empty run ID is required.")
 
     wb = load_workbook(source_path)
-
     try:
-
         if "SalesRepItem" not in wb.sheetnames:
-            raise ValueError(
-                "SalesRepItem worksheet missing."
-            )
-
+            raise ValueError("SalesRepItem sheet is missing.")
         ws = wb["SalesRepItem"]
-
         if ws["A1"].value != TEST_MARKER:
-            raise ValueError(
-                "Not a synthetic test workbook. "
-                "Writing blocked."
-            )
-
-        # ----------------------------------
-        # STEP 3: VALIDATE
-        # ----------------------------------
+            raise ValueError("Not a synthetic test workbook. Writing is blocked.")
 
         validate_workbook_structure(ws)
-
-        validate_incoming_transactions(
-            incoming_records
-        )
-
-        # ----------------------------------
-        # STEP 4: MATCH TRANSACTIONS
-        # ----------------------------------
-
+        validate_incoming_transactions(incoming_records)
         existing_records = read_existing_records(ws)
 
         remaining_existing = Counter(
-            make_transaction_key(record)
-            for record in existing_records
+            make_transaction_key(record) for record in existing_records
         )
-
         new_records = []
         matched_count = 0
-
         for record in incoming_records:
-
             key = make_transaction_key(record)
-
             if remaining_existing[key] > 0:
-
                 remaining_existing[key] -= 1
                 matched_count += 1
-
             else:
                 new_records.append(record)
 
-        # ----------------------------------
-        # STEP 5: INSERT MISSING RECORDS
-        # ----------------------------------
-
-        next_row = max(
-            5,
-            ws.max_row + 1,
-        )
-
+        next_row = max(5, ws.max_row + 1)
         if new_records and not existing_records:
-            raise ValueError(
-                "No transaction template row."
-            )
+            raise ValueError("No existing transaction template row.")
 
         for record in new_records:
-
-            copy_row_formatting_and_formulas(
-                ws=ws,
-                source_row=next_row - 1,
-                target_row=next_row,
-            )
-
+            copy_row_formatting_and_formulas(ws, next_row - 1, next_row)
             for field, column in COLUMN_MAP.items():
-
-                ws[f"{column}{next_row}"] = (
-                    record[field]
-                )
-
+                ws[f"{column}{next_row}"] = record[field]
             next_row += 1
 
-        # ----------------------------------
-        # STEP 6: RECONCILE IN MEMORY
-        # ----------------------------------
-
-        output_records = read_existing_records(ws)
-
         reconcile_totals(
-            existing_records,
-            new_records,
-            output_records,
+            existing_records, new_records, read_existing_records(ws)
         )
 
-        # ----------------------------------
-        # STEP 7: PREPARE TEMPORARY FILES
-        # ----------------------------------
-
-        output_path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         if audit_path is not None:
-            audit_path.parent.mkdir(
-                parents=True,
-                exist_ok=True,
-            )
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
 
         with tempfile.TemporaryDirectory(
-            prefix=".synthetic_run_",
-            dir=output_path.parent,
-        ) as temporary_directory:
-
-            temp_directory = Path(
-                temporary_directory
-            )
-
-            temp_excel = (
-                temp_directory / "report.xlsx"
-            )
-
-            temp_audit = (
-                temp_directory / "audit.json"
-            )
-
-            # Save uncommitted Excel output.
+            prefix=".synthetic_run_", dir=output_path.parent
+        ) as excel_temp_dir:
+            temp_excel = Path(excel_temp_dir) / "report.xlsx"
             wb.save(temp_excel)
 
-            # ----------------------------------
-            # STEP 8: VERIFY SAVED EXCEL
-            # ----------------------------------
-
-            verified_workbook = load_workbook(
-                temp_excel,
-                read_only=True,
-                data_only=False,
+            verified_wb = load_workbook(
+                temp_excel, read_only=True, data_only=False
             )
-
             try:
-
                 verified_records = read_existing_records(
-                    verified_workbook["SalesRepItem"]
+                    verified_wb["SalesRepItem"]
                 )
-
             finally:
-                verified_workbook.close()
+                verified_wb.close()
+            reconcile_totals(existing_records, new_records, verified_records)
 
-            reconcile_totals(
-                existing_records,
-                new_records,
-                verified_records,
-            )
-
-            # ----------------------------------
-            # STEP 9: PREPARE AUDIT RECORD
-            # ----------------------------------
-
-            if audit_path is not None:
-
-                output_hash = calculate_file_hash(
-                    temp_excel
-                )
-
+            if audit_path is None:
+                # Hard link will fail without overwriting if destination exists.
+                os.link(temp_excel, output_path)
+            else:
+                output_hash = calculate_file_hash(temp_excel)
                 audit_record = create_audit_record(
                     run_id=run_id,
-                    existing_count=len(
-                        existing_records
-                    ),
-                    inserted_count=len(
-                        new_records
-                    ),
+                    existing_count=len(existing_records),
+                    inserted_count=len(new_records),
                     reconciled=True,
                     output_hash=output_hash,
                 )
+                # Use verified, saved workbook values as the audit source.
+                audit_record["financial_totals"] = {
+                    field: str(value)
+                    for field, value in calculate_totals(verified_records).items()
+                }
+                # Keep the temporary audit on the audit destination's filesystem.
+                with tempfile.TemporaryDirectory(
+                    prefix=".synthetic_audit_", dir=audit_path.parent
+                ) as audit_temp_dir:
+                    temp_audit = Path(audit_temp_dir) / "audit.json"
+                    save_audit_log(audit_record, temp_audit)
 
-                save_audit_log(
-                    audit_record,
-                    temp_audit,
-                )
-
-            # ----------------------------------
-            # STEP 10: PUBLISH OUTPUT FILES
-            # ----------------------------------
-
-            # os.link refuses to overwrite an
-            # existing destination on Windows.
-            #
-            # Temporary and output Excel files
-            # are on the same filesystem.
-            #
-            # If publishing the audit fails,
-            # remove the Excel link created here.
-
-            published_excel = False
-
-            try:
-
-                os.link(
-                    temp_excel,
-                    output_path,
-                )
-
-                published_excel = True
-
-                if audit_path is not None:
-
-                    os.link(
-                        temp_audit,
-                        audit_path,
-                    )
-
-            except Exception:
-
-                if published_excel:
-                    output_path.unlink(
-                        missing_ok=True
-                    )
-
-                raise
-
+                    published_excel = False
+                    try:
+                        os.link(temp_excel, output_path)
+                        published_excel = True
+                        # Does not replace a pre-existing audit destination.
+                        os.link(temp_audit, audit_path)
+                    except Exception:
+                        if published_excel:
+                            output_path.unlink(missing_ok=True)
+                        raise
     finally:
         wb.close()
-
-    # --------------------------------------
-    # STEP 11: RETURN EXECUTION SUMMARY
-    # --------------------------------------
 
     result = {
         "matched": matched_count,
         "inserted": len(new_records),
-        "existing_before": len(
-            existing_records
-        ),
-        "existing_after": (
-            len(existing_records)
-            + len(new_records)
-        ),
+        "existing_before": len(existing_records),
+        "existing_after": len(existing_records) + len(new_records),
         "reconciled": True,
     }
-
     if audit_path is not None:
-
-        result["audit_path"] = str(
-            audit_path
-        )
-
+        result["audit_path"] = str(audit_path)
         result["run_id"] = run_id
-
     return result
