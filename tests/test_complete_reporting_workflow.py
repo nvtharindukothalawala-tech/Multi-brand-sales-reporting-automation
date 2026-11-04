@@ -270,3 +270,121 @@ def test_missing_excel_transaction_detected(
     # should be only 1 transaction instead of 2.
     with pytest.raises(ValueError):
         verify_workbook_audit(output, audit)
+
+# ==========================================
+# LESSON 53
+# INCOMPLETE TRANSACTION DETECTION
+# ==========================================
+
+
+# TEST 5: DETECT MISSING PRODUCT
+
+def test_missing_product_is_rejected(tmp_path):
+
+    source = tmp_path / "original.xlsx"
+    output = tmp_path / "updated.xlsx"
+    audit = tmp_path / "audit.json"
+
+    make_workbook(source)
+
+    write_synthetic_copy(
+        source_path=source,
+        output_path=output,
+        incoming_records=[
+            fake_sale("TEST001"),
+            fake_sale("TEST002"),
+        ],
+        audit_path=audit,
+        run_id="TEST-QUALITY-001",
+    )
+
+    workbook = load_workbook(output)
+
+    try:
+        worksheet = workbook["SalesRepItem"]
+
+        # AO = Product column.
+        # Remove the second transaction's product.
+        worksheet["AO6"] = None
+
+        workbook.save(output)
+
+    finally:
+        workbook.close()
+
+    # Update checksum to isolate
+    # transaction-content validation.
+    record = json.loads(
+        audit.read_text(encoding="utf-8")
+    )
+
+    record["output_sha256"] = (
+        calculate_file_hash(output)
+    )
+
+    audit.write_text(
+        json.dumps(record),
+        encoding="utf-8",
+    )
+
+    # Transaction count still equals 2,
+    # but a required product is missing.
+    with pytest.raises(ValueError):
+        verify_workbook_audit(output, audit)
+
+
+# TEST 6: DETECT MISSING SOLD QUANTITY
+
+def test_missing_sold_quantity_is_rejected(
+    tmp_path,
+):
+
+    source = tmp_path / "original.xlsx"
+    output = tmp_path / "updated.xlsx"
+    audit = tmp_path / "audit.json"
+
+    make_workbook(source)
+
+    write_synthetic_copy(
+        source_path=source,
+        output_path=output,
+        incoming_records=[
+            fake_sale("TEST001"),
+            fake_sale("TEST002"),
+        ],
+        audit_path=audit,
+        run_id="TEST-QUALITY-002",
+    )
+
+    workbook = load_workbook(output)
+
+    try:
+        worksheet = workbook["SalesRepItem"]
+
+        # AT = Sold Quantity column.
+        worksheet["AT6"] = None
+
+        workbook.save(output)
+
+    finally:
+        workbook.close()
+
+    # Update checksum so the audit hash
+    # matches the modified workbook.
+    record = json.loads(
+        audit.read_text(encoding="utf-8")
+    )
+
+    record["output_sha256"] = (
+        calculate_file_hash(output)
+    )
+
+    audit.write_text(
+        json.dumps(record),
+        encoding="utf-8",
+    )
+
+    # Both Bill Numbers still exist.
+    # However, quantity is missing.
+    with pytest.raises(ValueError):
+        verify_workbook_audit(output, audit)
