@@ -170,3 +170,103 @@ def test_modified_output_fails_verification(
             output,
             audit,
         )
+
+
+# ==========================================
+# LESSON 51
+# AUDIT VS ACTUAL WORKBOOK COUNT TESTS
+# ==========================================
+
+
+# TEST 3: AUDIT CLAIMS TOO MANY TRANSACTIONS
+
+def test_audit_count_must_match_excel(tmp_path):
+
+    source = tmp_path / "original.xlsx"
+    output = tmp_path / "updated.xlsx"
+    audit = tmp_path / "audit.json"
+
+    make_workbook(source)
+
+    write_synthetic_copy(
+        source_path=source,
+        output_path=output,
+        incoming_records=[
+            fake_sale("TEST001"),
+            fake_sale("TEST002"),
+        ],
+        audit_path=audit,
+        run_id="TEST-COUNT-001",
+    )
+
+    # Workbook contains 2 transactions.
+    # Change the audit to claim 10.
+    record = json.loads(
+        audit.read_text(encoding="utf-8")
+    )
+
+    record["existing_count"] = 8
+    record["inserted_count"] = 2
+    record["final_count"] = 10
+
+    audit.write_text(
+        json.dumps(record),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError):
+        verify_workbook_audit(output, audit)
+
+
+# TEST 4: WORKBOOK TRANSACTION DISAPPEARS
+
+def test_missing_excel_transaction_detected(
+    tmp_path,
+):
+
+    source = tmp_path / "original.xlsx"
+    output = tmp_path / "updated.xlsx"
+    audit = tmp_path / "audit.json"
+
+    make_workbook(source)
+
+    write_synthetic_copy(
+        source_path=source,
+        output_path=output,
+        incoming_records=[
+            fake_sale("TEST001"),
+            fake_sale("TEST002"),
+        ],
+        audit_path=audit,
+        run_id="TEST-COUNT-002",
+    )
+
+    # Remove the second transaction.
+    workbook = load_workbook(output)
+
+    try:
+        worksheet = workbook["SalesRepItem"]
+        worksheet.delete_rows(6, 1)
+        workbook.save(output)
+    finally:
+        workbook.close()
+
+    # Update the checksum to match the
+    # changed file, but leave counts unchanged.
+    record = json.loads(
+        audit.read_text(encoding="utf-8")
+    )
+
+    record["output_sha256"] = (
+        calculate_file_hash(output)
+    )
+
+    audit.write_text(
+        json.dumps(record),
+        encoding="utf-8",
+    )
+
+    # The file hash now matches, but there
+    # should be only 1 transaction instead of 2.
+    with pytest.raises(ValueError):
+        verify_workbook_audit(output, audit)

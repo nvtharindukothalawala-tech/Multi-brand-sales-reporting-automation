@@ -1,18 +1,18 @@
 
 # ==========================================
 # AUDIT INTEGRITY VERIFICATION ENGINE
-# LESSON 45
+# LESSON 52 - COMPLETE VERSION
 # ==========================================
 
 import json
 
 from pathlib import Path
-
-from src.audit_logging import calculate_file_hash
-
 from zipfile import BadZipFile
 
 from openpyxl import load_workbook
+
+from src.audit_logging import calculate_file_hash
+
 
 # ==========================================
 # 1. VERIFY AUDIT INTEGRITY
@@ -23,23 +23,26 @@ def verify_audit_integrity(
     audit_path,
 ):
     """
-    Verify that a synthetic report matches
-    its JSON audit record.
+    Verify a synthetic report against its
+    JSON audit record.
 
     Checks:
     1. Required files exist
     2. Audit JSON is valid
-    3. Report is marked synthetic
-    4. Reconciliation succeeded
+    3. Report type is synthetic
+    4. Financial reconciliation succeeded
     5. Audit status is VERIFIED
-    6. Recorded checksum matches the file
+    6. Transaction counts are valid
+    7. Transaction counts are consistent
+    8. Recorded checksum is valid
+    9. Actual checksum matches the audit
     """
 
     excel_path = Path(excel_path)
     audit_path = Path(audit_path)
 
     # --------------------------------------
-    # CHECK 1: REQUIRED FILES
+    # CHECK 1: REQUIRED FILES EXIST
     # --------------------------------------
 
     if not excel_path.is_file():
@@ -57,13 +60,11 @@ def verify_audit_integrity(
     # --------------------------------------
 
     try:
-
         with open(
             audit_path,
             "r",
             encoding="utf-8",
         ) as file:
-
             audit_record = json.load(file)
 
     except json.JSONDecodeError:
@@ -106,7 +107,7 @@ def verify_audit_integrity(
         )
 
     # --------------------------------------
-    # CHECK 6: TRANSACTION COUNT VALIDATION
+    # CHECK 6: VALIDATE TRANSACTION COUNTS
     # --------------------------------------
 
     count_fields = (
@@ -130,6 +131,10 @@ def verify_audit_integrity(
                 f"{field}"
             )
 
+    # --------------------------------------
+    # CHECK 7: COUNT CONSISTENCY
+    # --------------------------------------
+
     existing_count = audit_record["existing_count"]
     inserted_count = audit_record["inserted_count"]
     final_count = audit_record["final_count"]
@@ -145,9 +150,8 @@ def verify_audit_integrity(
             f"found {final_count}."
         )
 
-
     # --------------------------------------
-    # CHECK 6: RECORDED CHECKSUM
+    # CHECK 8: RECORDED CHECKSUM
     # --------------------------------------
 
     recorded_hash = audit_record.get(
@@ -167,7 +171,7 @@ def verify_audit_integrity(
         )
 
     # --------------------------------------
-    # CHECK 7: CALCULATE ACTUAL CHECKSUM
+    # CHECK 9: CALCULATE ACTUAL CHECKSUM
     # --------------------------------------
 
     actual_hash = calculate_file_hash(
@@ -190,19 +194,14 @@ def verify_audit_integrity(
         "status": "VERIFIED",
         "report_type": "SYNTHETIC_TEST_ONLY",
         "output_sha256": actual_hash,
-        "existing_count": audit_record.get(
-            "existing_count"
-        ),
-        "inserted_count": audit_record.get(
-            "inserted_count"
-        ),
-        "final_count": audit_record.get(
-            "final_count"
-        ),
+        "existing_count": existing_count,
+        "inserted_count": inserted_count,
+        "final_count": final_count,
     }
+
+
 # ==========================================
-# LESSON 49
-# SYNTHETIC WORKBOOK AUDIT VERIFICATION
+# 2. VERIFY SYNTHETIC EXCEL WORKBOOK
 # ==========================================
 
 def verify_workbook_audit(
@@ -214,11 +213,13 @@ def verify_workbook_audit(
     of a synthetic Excel workbook.
 
     Checks:
-    1. Audit checksum and metadata
+    1. Audit JSON and SHA-256 checksum
     2. XLSX file extension
-    3. Valid Excel workbook
-    4. Required SalesRepItem worksheet
-    5. Synthetic marker in cell A1
+    3. Excel workbook is readable
+    4. SalesRepItem worksheet exists
+    5. Synthetic marker exists in A1
+    6. Count actual Excel transactions
+    7. Compare actual count with audit
     """
 
     excel_path = Path(excel_path)
@@ -288,6 +289,54 @@ def verify_workbook_audit(
                 "is missing or incorrect."
             )
 
+        # ----------------------------------
+        # CHECK 6: COUNT ACTUAL TRANSACTIONS
+        # ----------------------------------
+
+        # Transaction records begin at row 5.
+        # Bill numbers are stored in column Z.
+        #
+        # Column Z = Excel column number 26.
+
+        actual_transaction_count = 0
+
+        for row in worksheet.iter_rows(
+            min_row=5,
+            min_col=26,
+            max_col=26,
+            values_only=True,
+        ):
+
+            bill_no = row[0]
+
+            # Only count rows with
+            # a non-empty Bill Number.
+            if (
+                bill_no is not None
+                and str(bill_no).strip() != ""
+            ):
+                actual_transaction_count += 1
+
+        # ----------------------------------
+        # CHECK 7: COMPARE WITH AUDIT COUNT
+        # ----------------------------------
+
+        expected_transaction_count = (
+            result["final_count"]
+        )
+
+        if (
+            actual_transaction_count
+            != expected_transaction_count
+        ):
+            raise ValueError(
+                "Workbook transaction count mismatch: "
+                f"Audit expected "
+                f"{expected_transaction_count}, "
+                f"Excel contains "
+                f"{actual_transaction_count}."
+            )
+
     finally:
 
         # Always close the workbook.
@@ -300,5 +349,12 @@ def verify_workbook_audit(
     result["workbook_verified"] = True
     result["required_sheet"] = "SalesRepItem"
     result["synthetic_marker_verified"] = True
+
+    # Additional verification metadata
+    result["actual_transaction_count"] = (
+        actual_transaction_count
+    )
+
+    result["transaction_count_verified"] = True
 
     return result
