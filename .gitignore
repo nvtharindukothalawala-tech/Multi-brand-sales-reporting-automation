@@ -37,3 +37,4 @@ config/reporting_scope_review.csv
 # Operating system
 .DS_Store
 Thumbs.db
+recovery_report.json
