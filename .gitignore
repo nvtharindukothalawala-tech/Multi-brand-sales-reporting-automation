@@ -40,3 +40,13 @@ Thumbs.db
 recovery_report.json
 
 recovery_lesson*.json
+tests/manual_business_mapping_inspection.py
+tests/manual_date_validation.py
+tests/manual_five_business_reconciliation.py
+tests/manual_header_discovery.py
+tests/manual_header_final_check.py
+tests/manual_note_exchange_validation.py
+tests/manual_real_data_inspection.py
+tests/manual_returns_matching.py
+tests/manual_returns_template_inspection.py
+tests/manual_template_inspection.py
