@@ -102,6 +102,48 @@ def verify_audit_integrity(
             "Audit status is not VERIFIED."
         )
 
+    
+    # --------------------------------------
+    # CHECK 6: TRANSACTION COUNT VALIDATION
+    # --------------------------------------
+
+    count_fields = (
+        "existing_count",
+        "inserted_count",
+        "final_count",
+    )
+
+    for field in count_fields:
+
+        value = audit_record.get(field)
+
+        # Reject missing, negative, decimal,
+        # string, and boolean count values.
+        if (
+            type(value) is not int
+            or value < 0
+        ):
+            raise ValueError(
+                f"Invalid audit transaction count: "
+                f"{field}"
+            )
+
+    existing_count = audit_record["existing_count"]
+    inserted_count = audit_record["inserted_count"]
+    final_count = audit_record["final_count"]
+
+    expected_final_count = (
+        existing_count + inserted_count
+    )
+
+    if final_count != expected_final_count:
+        raise ValueError(
+            "Audit transaction count mismatch: "
+            f"expected {expected_final_count}, "
+            f"found {final_count}."
+        )
+
+
     # --------------------------------------
     # CHECK 6: RECORDED CHECKSUM
     # --------------------------------------

@@ -126,3 +126,110 @@ def test_missing_audit_file_is_rejected(tmp_path):
             excel,
             audit,
         )
+
+
+# ==========================================
+# LESSON 46 - ADVANCED AUDIT VALIDATION
+# ==========================================
+
+
+# TEST 5: CORRUPTED JSON
+
+def test_corrupted_audit_json_is_rejected(tmp_path):
+
+    excel, audit = create_test_files(tmp_path)
+
+    audit.write_text(
+        "{invalid_json",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError):
+        verify_audit_integrity(excel, audit)
+
+
+# TEST 6: MISSING CHECKSUM
+
+def test_missing_checksum_is_rejected(tmp_path):
+
+    excel, audit = create_test_files(tmp_path)
+
+    record = json.loads(
+        audit.read_text(encoding="utf-8")
+    )
+
+    record.pop("output_sha256")
+
+    audit.write_text(
+        json.dumps(record),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError):
+        verify_audit_integrity(excel, audit)
+
+
+# TEST 7: INCORRECT REPORT TYPE
+
+def test_wrong_report_type_is_rejected(tmp_path):
+
+    excel, audit = create_test_files(tmp_path)
+
+    record = json.loads(
+        audit.read_text(encoding="utf-8")
+    )
+
+    record["report_type"] = "PRODUCTION"
+
+    audit.write_text(
+        json.dumps(record),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError):
+        verify_audit_integrity(excel, audit)
+
+
+# TEST 8: INCONSISTENT TRANSACTION COUNTS
+
+def test_inconsistent_transaction_counts_rejected(
+    tmp_path,
+):
+    excel, audit = create_test_files(tmp_path)
+
+    record = json.loads(
+        audit.read_text(encoding="utf-8")
+    )
+
+    # Existing 10 + Inserted 2 should equal 12.
+    record["final_count"] = 999
+
+    audit.write_text(
+        json.dumps(record),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError):
+        verify_audit_integrity(excel, audit)
+
+
+# TEST 9: INVALID NEGATIVE COUNTS
+
+def test_negative_transaction_count_rejected(
+    tmp_path,
+):
+    excel, audit = create_test_files(tmp_path)
+
+    record = json.loads(
+        audit.read_text(encoding="utf-8")
+    )
+
+    record["existing_count"] = -10
+
+    audit.write_text(
+        json.dumps(record),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError):
+        verify_audit_integrity(excel, audit)
