@@ -180,6 +180,25 @@ def verify_workbook_audit(excel_path, audit_path):
         ):
             bill_no = row[REQUIRED_COLUMNS["bill_no"] - 1]
             if bill_no is None or (isinstance(bill_no, str) and not bill_no.strip()):
+                # A blank, formatted row is permitted. Transaction values
+                # without a Bill Number are not: otherwise they could be
+                # silently excluded from both row counts and financial sums.
+                transaction_columns = (
+                    column for field, column in REQUIRED_COLUMNS.items()
+                    if field != "bill_no"
+                )
+                if any(
+                    row[column - 1] is not None
+                    and not (
+                        isinstance(row[column - 1], str)
+                        and not row[column - 1].strip()
+                    )
+                    for column in transaction_columns
+                ):
+                    raise ValueError(
+                        f"Orphan transaction data at row {row_number}: "
+                        "Bill Number is missing."
+                    )
                 continue
 
             _validate_transaction_row(row, row_number)
